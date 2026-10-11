@@ -1,0 +1,6 @@
+pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+rootProject.name = 'TriathlonCefkPrep'
+include ':core'
+// Core checks can run without resolving the Android plugin or accepting SDK licences.
+if (!providers.gradleProperty('coreOnly').isPresent()) { include ':app' }

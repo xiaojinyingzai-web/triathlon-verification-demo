@@ -1,0 +1,68 @@
+plugins { id 'com.android.application' version '8.9.2' }
+android {
+    namespace 'com.triathlon.prep'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'com.triathlon.prep'
+        // PREP18: POI's JVM MethodHandle bytecode and existing LIVE camera require API26+.
+        // Target device remains Android11/API30; no Android7.x install compatibility claimed.
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName '0.1.0-prep'
+    }
+    flavorDimensions 'adapter'
+    productFlavors {
+        live { dimension 'adapter' }
+        simulation {
+            dimension 'adapter'
+            applicationIdSuffix '.simulation'
+            versionNameSuffix '-TEST'
+        }
+    }
+    // No simulation release artifact can be mistaken for a real device build.
+    variantFilter { variant ->
+        if (variant.flavors*.name.contains('simulation') && variant.buildType.name == 'release') {
+            variant.setIgnore(true)
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    // Standard Android camera code lives in LIVE. Retired device-specific files are outside sourceSets.
+    packagingOptions { resources.excludes += ['META-INF/DEPENDENCIES'] }
+}
+dependencies {
+    implementation project(':core')
+    // Exactly one selected reader/iot/mqtt version. Local AARs do not resolve old Super POM edges.
+    liveImplementation files('src/live/libs/cefk/CshtReadCard-4.2.9.aar',
+        'src/live/libs/cefk/CshtReadCard_Super-1.3.0.aar', 'src/live/libs/cefk/CshtReadCard_iot-1.3.0.aar',
+        'src/live/libs/cefk/linkCppSo-1.0.4.aar', 'src/live/libs/cefk/mqttService-1.0.3.aar')
+    liveImplementation 'org.jetbrains.kotlin:kotlin-stdlib:1.3.72'
+    liveImplementation 'org.jetbrains.kotlin:kotlin-reflect:1.3.72'
+    liveImplementation 'org.jetbrains.kotlin:kotlin-test:1.3.72'
+    liveImplementation 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.3.2'
+    liveImplementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.3.2'
+    liveImplementation 'androidx.appcompat:appcompat:1.1.0'
+    liveImplementation 'androidx.core:core-ktx:1.2.0'
+    liveImplementation 'com.google.android.material:material:1.1.0'
+    liveImplementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.0.0'
+    liveImplementation 'androidx.multidex:multidex:2.0.1'
+    liveImplementation 'androidx.localbroadcastmanager:localbroadcastmanager:1.0.0'
+    liveImplementation 'org.eclipse.paho:org.eclipse.paho.client.mqttv3:1.2.5'
+    liveImplementation 'org.bouncycastle:bcprov-jdk15on:1.70'
+    liveImplementation 'com.google.code.gson:gson:2.9.1'
+}
+
+// Public distribution guard only; does not change the selected product's logic.
+tasks.matching { it.name.startsWith('preLive') && it.name.endsWith('Build') }.configureEach {
+    doFirst {
+        ['CshtReadCard-4.2.9.aar', 'CshtReadCard_Super-1.3.0.aar',
+         'CshtReadCard_iot-1.3.0.aar', 'linkCppSo-1.0.4.aar', 'mqttService-1.0.3.aar'].each { name ->
+            if (!file('src/live/libs/cefk/' + name).isFile()) {
+                throw new GradleException('LIVE requires separately obtained licensed vendor AARs; they are not distributed here.')
+            }
+        }
+    }
+}

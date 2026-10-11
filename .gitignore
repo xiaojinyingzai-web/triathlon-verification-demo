@@ -1,0 +1,13 @@
+**/.gradle/
+**/build/
+**/local.properties
+**/.idea/
+*.iml
+*.apk
+*.aar
+*.jar
+*.so
+*.keystore
+*.jks
+*.xls
+*.xlsx

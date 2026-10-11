@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
+    <!-- Runtime request is gated by confirmed LIVE configuration and an explicit capture action; default remains disabled. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
+    <!-- No real service calls or SDK auto-init in the no-device candidate. -->
+    <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" tools:node="remove" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" tools:node="remove" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" tools:node="remove" />
+    <uses-permission android:name="android.permission.NFC" tools:node="remove" />
+    <uses-feature android:name="android.hardware.usb.UsbDevice" tools:node="remove" />
+    <uses-feature android:name="android.hardware.usb.UsbManager" tools:node="remove" />
+    <application android:allowBackup="false" android:usesCleartextTraffic="false"
+        tools:replace="android:allowBackup" tools:remove="android:networkSecurityConfig">
+        <provider android:name="com.csht.jni.CostomZrgkCppContentProvider" tools:node="remove" />
+        <service android:name="com.csht.autograde.CshtMqttService" tools:node="remove" />
+        <service android:name="org.eclipse.paho.android.service.MqttService" tools:node="remove" />
+        <service android:name="com.csht.service.PingService" tools:node="remove" />
+    </application>
+</manifest>

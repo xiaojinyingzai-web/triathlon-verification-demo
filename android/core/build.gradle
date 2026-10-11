@@ -1,0 +1,61 @@
+plugins { id 'java-library' }
+dependencies { implementation 'org.apache.poi:poi:5.5.1' }
+java {
+    sourceCompatibility = JavaVersion.VERSION_1_8
+    targetCompatibility = JavaVersion.VERSION_1_8
+}
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 8
+}
+tasks.register('selfCheck', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.triathlon.prep.core.CoreSelfCheck'
+    enableAssertions = true
+}
+check.dependsOn selfCheck
+tasks.register('rosterCheck', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.triathlon.prep.core.RosterSelfCheck'
+    args layout.buildDirectory.dir('roster-check-data').get().asFile.absolutePath
+    enableAssertions = true
+}
+check.dependsOn rosterCheck
+tasks.register('rosterClasspath') {
+    doLast { println('ROSTER_CLASSPATH=' + sourceSets.main.runtimeClasspath.asPath) }
+}
+tasks.register('prep19Check', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.triathlon.prep.core.Prep19SelfCheck'
+    if (providers.gradleProperty('prep19Fixture').isPresent()) {
+        args providers.gradleProperty('prep19Fixture').get()
+    }
+    enableAssertions = true
+}
+check.dependsOn prep19Check
+tasks.register('receiptCheck', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.triathlon.prep.core.ReceiptSelfCheck'
+    if (providers.gradleProperty('prep19Output').isPresent()) {
+        args providers.gradleProperty('prep19Output').get()
+    }
+    enableAssertions = true
+}
+check.dependsOn receiptCheck
+tasks.register('receiptPrintCheck', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.triathlon.prep.core.ReceiptPrintSelfCheck'
+    enableAssertions = true
+}
+check.dependsOn receiptPrintCheck
+tasks.withType(JavaExec).configureEach {
+    systemProperty 'file.encoding', 'UTF-8'
+    systemProperty 'log4j2.loggerContextFactory', 'org.apache.logging.log4j.simple.SimpleLoggerContextFactory'
+    systemProperty 'log4j2.simplelogLevel', 'OFF'
+    systemProperty 'log4j2.statusLoggerLevel', 'OFF'
+}
