@@ -10,6 +10,8 @@ import java.security.MessageDigest;
 public final class PrintModePreferences implements AutoPrintPolicy.Store {
     public static final String PREFERENCES_NAME = "triathlon_print_policy_v1";
     private static final String MODE = "mode";
+    private static final String ENABLED="enabled";
+    private static final java.util.Set<SharedPreferences> FAILED=java.util.Collections.newSetFromMap(new java.util.WeakHashMap<SharedPreferences,Boolean>());
     private static final String RESERVED = "RESERVED_OR_UNCONFIRMED";
     // SharedPreferences has no CAS; serialize check+commit across all our store instances.
     private static final Object PROCESS_LOCK = new Object();
@@ -25,17 +27,28 @@ public final class PrintModePreferences implements AutoPrintPolicy.Store {
     }
     @Override public AutoPrintPolicy.Mode loadMode() {
         synchronized (PROCESS_LOCK) {
-            try {
                 String value = preferences.getString(MODE, AutoPrintPolicy.Mode.MANUAL.name());
+                if(!AutoPrintPolicy.Mode.MANUAL.name().equals(value)&&!AutoPrintPolicy.Mode.AUTOMATIC.name().equals(value))throw new IllegalStateException("Invalid print mode");
                 return AutoPrintPolicy.Mode.AUTOMATIC.name().equals(value)
                         ? AutoPrintPolicy.Mode.AUTOMATIC : AutoPrintPolicy.Mode.MANUAL;
-            } catch (RuntimeException ignored) { return AutoPrintPolicy.Mode.MANUAL; }
         }
     }
+    @Override public boolean loadEnabled(){synchronized(PROCESS_LOCK){
+        if(FAILED.contains(preferences))throw new IllegalStateException("Print setting write was unconfirmed");
+        return preferences.getBoolean(ENABLED,true);
+    }}
+    @Override public boolean saveEnabled(boolean enabled){synchronized(PROCESS_LOCK){
+        try{if(preferences.edit().putBoolean(ENABLED,enabled).commit()){FAILED.remove(preferences);return true;}}
+        catch(RuntimeException ignored){/* SharedPreferences may have changed its cache before failure. */}
+        FAILED.add(preferences);
+        try{preferences.edit().putBoolean(ENABLED,false).commit();}catch(RuntimeException ignored){/* Fail closed in policy and other in-process owners. */}
+        return false;
+    }}
     @Override public boolean saveMode(AutoPrintPolicy.Mode mode) {
         if (mode == null) throw new IllegalArgumentException("Mode required");
         synchronized (PROCESS_LOCK) {
-            String previous = loadMode().name();
+            String previous;
+            try{previous=loadMode().name();}catch(RuntimeException ignored){FAILED.add(preferences);return false;}
             try {
                 if (preferences.edit().putString(MODE, mode.name()).commit()) return true;
             } catch (RuntimeException ignored) { /* commit may already have changed the memory cache */ }
@@ -43,6 +56,7 @@ public final class PrintModePreferences implements AutoPrintPolicy.Store {
             // previous effective value so another in-process owner cannot read a failed enable.
             try { preferences.edit().putString(MODE, previous).commit(); }
             catch (RuntimeException ignored) { /* policy retains old mode and revokes fresh permission */ }
+            FAILED.add(preferences);
             return false;
         }
     }

@@ -17,6 +17,9 @@ final class ReceiptPresenter {
   return model(flow,printing,layout,"");
  }
  static ReceiptPreviewView.Model model(Verification flow,ReceiptPrintController printing,CheckInReceipt.Layout layout,String heading){
+  return model(flow,printing,layout,heading,true);
+ }
+ static ReceiptPreviewView.Model model(Verification flow,ReceiptPrintController printing,CheckInReceipt.Layout layout,String heading,boolean printingAllowed){
   ReceiptPrintController.Snapshot job=printing.snapshot();
   synchronized(flow){
    Verification.Snapshot state=flow.snapshot();String id=state.sessionId.isEmpty()?"NO_CURRENT_SESSION":state.sessionId;
@@ -26,9 +29,9 @@ final class ReceiptPresenter {
    ReceiptPrintController.Status status=same?job.status:ReceiptPrintController.Status.IDLE;
    boolean simulation=state.mode==Verification.Mode.TEST;
    // TEST layout is a synthetic rendering fixture. Delivered printer dots/charset remain unknown.
-   boolean eligible=document!=null&&layout!=null;
+   boolean eligible=document!=null&&layout!=null&&printingAllowed;
    return new ReceiptPreviewView.Model(id,simulation,document,status,same?job.failure:ReceiptPrintController.Failure.NONE,
-    same?job.jobId:"",layout!=null?"":"打印参数未确认，当前仅可预览。",
+    same?job.jobId:"",!printingAllowed?"打印已关闭或设置未确认，仍可预览。":layout!=null?"":"打印参数未确认，当前仅可预览。",
     eligible&&(status==ReceiptPrintController.Status.IDLE||status==ReceiptPrintController.Status.SIMULATED||status==ReceiptPrintController.Status.ACCEPTED),
     eligible&&(status==ReceiptPrintController.Status.FAILED||status==ReceiptPrintController.Status.CANCELLED),
     document!=null&&status==ReceiptPrintController.Status.SENDING,true);

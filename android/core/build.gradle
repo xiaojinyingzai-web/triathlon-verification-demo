@@ -53,6 +53,21 @@ tasks.register('receiptPrintCheck', JavaExec) {
     enableAssertions = true
 }
 check.dependsOn receiptPrintCheck
+
+tasks.register('printSwitchCheck', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.triathlon.prep.core.PrintSwitchSelfCheck'
+    enableAssertions = true
+}
+check.dependsOn printSwitchCheck
+tasks.register('autoPrintCheck', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.triathlon.prep.core.AutoPrintPolicySelfCheck'
+    enableAssertions = true
+}
+check.dependsOn autoPrintCheck
 tasks.withType(JavaExec).configureEach {
     systemProperty 'file.encoding', 'UTF-8'
     systemProperty 'log4j2.loggerContextFactory', 'org.apache.logging.log4j.simple.SimpleLoggerContextFactory'

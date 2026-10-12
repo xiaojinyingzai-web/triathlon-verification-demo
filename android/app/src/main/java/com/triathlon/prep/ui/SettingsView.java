@@ -34,6 +34,7 @@ public final class SettingsView extends ScrollView {
     private final TextView[] statuses=new TextView[5];
     private final ReceiptNameControl receiptNameControl;
     private final DisplayRoleControl displayRoleControl;
+    private final SpeechControl speechControl;
 
     public SettingsView(Context context,Actions actions) {
         this(context,actions,null);
@@ -45,6 +46,9 @@ public final class SettingsView extends ScrollView {
         this(context,actions,onDiagnostics,receiptNameActions,null);
     }
     public SettingsView(Context context,Actions actions,Runnable onDiagnostics,ReceiptNameControl.Actions receiptNameActions,DisplayRoleControl.Actions displayRoleActions) {
+        this(context,actions,onDiagnostics,receiptNameActions,displayRoleActions,null);
+    }
+    public SettingsView(Context context,Actions actions,Runnable onDiagnostics,ReceiptNameControl.Actions receiptNameActions,DisplayRoleControl.Actions displayRoleActions,SpeechControl.Actions speechActions) {
         super(context);if(actions==null)throw new IllegalArgumentException("actions required");
         setFillViewport(true);setBackgroundColor(0xfff5f7fa);
         LinearLayout panel=column();panel.setPadding(dp(18),dp(16),dp(18),dp(18));
@@ -61,6 +65,8 @@ public final class SettingsView extends ScrollView {
         if(receiptNameControl!=null){LinearLayout receipt=card();receipt.addView(receiptNameControl);add(panel,receipt,16);}
         displayRoleControl=displayRoleActions==null?null:new DisplayRoleControl(context,displayRoleActions);
         if(displayRoleControl!=null){LinearLayout displays=card();displays.addView(displayRoleControl);add(panel,displays,16);}
+        speechControl=speechActions==null?null:new SpeechControl(context,speechActions);
+        if(speechControl!=null){LinearLayout speech=card();speech.addView(speechControl);add(panel,speech,16);}
 
         LinearLayout threshold=card();threshold.addView(text("核验阈值",20,INK,true));add(threshold,text("在线服务评分规则待确认",14,MUTED,false),8);
         TextView thresholdLabel=text("人证比对阈值",16,INK,false);add(threshold,thresholdLabel,16);
@@ -80,6 +86,7 @@ public final class SettingsView extends ScrollView {
         if(Looper.myLooper()!=Looper.getMainLooper())throw new IllegalStateException("render on main thread");
         if(m==null)throw new IllegalArgumentException("model required");
         mode.setText(m.simulation?"虚构测试":"正式模式");
+        if(speechControl!=null)speechControl.setSimulation(m.simulation);
         String[] values={m.cardReader,m.camera,m.algorithm,m.authorization,m.storage};
         for(int i=0;i<values.length;i++)statuses[i].setText(value(values[i],"未核实"));
         packageName.setText(value(m.packageName,"未读取"));versionName.setText(value(m.versionName,"未读取"));
@@ -94,6 +101,10 @@ public final class SettingsView extends ScrollView {
     public boolean renderDisplayRoles(DisplayRoleControl.Model m){
         if(Looper.myLooper()!=Looper.getMainLooper())throw new IllegalStateException("render on main thread");
         if(m==null)throw new IllegalArgumentException("display model required");if(displayRoleControl==null)return false;displayRoleControl.render(m);return true;
+    }
+    public boolean renderSpeech(SpeechControl.Model m){
+        if(Looper.myLooper()!=Looper.getMainLooper())throw new IllegalStateException("render on main thread");
+        if(m==null)throw new IllegalArgumentException("speech model required");if(speechControl==null)return false;speechControl.render(m);return true;
     }
     private String value(String s,String fallback){return s==null||s.trim().isEmpty()?fallback:s;}
     private TextView field(LinearLayout parent,String label,String value){LinearLayout r=row();r.setMinimumHeight(dp(48));r.addView(text(label,16,INK,false),new LinearLayout.LayoutParams(0,LayoutParams.WRAP_CONTENT,1));TextView v=text(value,14,MUTED,false);v.setGravity(Gravity.END);r.addView(v,new LinearLayout.LayoutParams(0,LayoutParams.WRAP_CONTENT,1));add(parent,r,6);return v;}

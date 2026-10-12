@@ -7,10 +7,13 @@ public final class AutoPrintPolicy {
     public interface Store {
         Mode loadMode() throws Exception;
         boolean saveMode(Mode mode) throws Exception;
+        /** Missing key in a legacy store preserves printing. */
+        default boolean loadEnabled() throws Exception { return true; }
+        default boolean saveEnabled(boolean enabled) throws Exception { throw new UnsupportedOperationException("Printing switch storage required"); }
         /** Atomic durable test-and-set. Never clear reservations on printer failure or restart. */
         Claim claim(String receiptKey) throws Exception;
     }
-    public enum Reason { MANUAL_MODE, NOT_FRESH, STALE_SESSION, INELIGIBLE, WAITING_FOR_SAVE,
+    public enum Reason { PRINT_DISABLED, MANUAL_MODE, NOT_FRESH, STALE_SESSION, INELIGIBLE, WAITING_FOR_SAVE,
         ALREADY_CLAIMED, STORE_FAILED, DISPATCHED_UNCONFIRMED, SUBMIT_FAILED_UNCONFIRMED }
     public static final class Attempt {
         public final Reason reason;
@@ -22,6 +25,8 @@ public final class AutoPrintPolicy {
     }
     private final Store store;
     private Mode mode;
+    private boolean enabled=true,settingsFailed;
+    private volatile boolean printingInhibited=true;
     private Verification owner;
     private String sessionId;
     private Verification.Mode verificationMode;
@@ -31,17 +36,36 @@ public final class AutoPrintPolicy {
         if (store == null) throw new IllegalArgumentException("Durable store required");
         this.store = store;
         try { mode = store.loadMode(); }
-        catch (Exception | LinkageError ignored) { mode = Mode.MANUAL; }
+        catch (Exception | LinkageError ignored) { mode = Mode.MANUAL; settingsFailed=true; }
         if (mode == null) mode = Mode.MANUAL;
+        try { enabled=store.loadEnabled(); }
+        catch(Exception|LinkageError ignored) { enabled=false;settingsFailed=true; }
+        printingInhibited=settingsFailed||!enabled;
         // Loading persisted AUTOMATIC mode does not grant a recovered result permission to print.
     }
     public synchronized Mode mode() { return mode; }
+    public synchronized boolean enabled() { return enabled; }
+    public synchronized boolean settingsFailed() { return settingsFailed; }
+    /** Nonblocking admission gate: the UI can inhibit while an earlier send is in progress. */
+    public boolean printingAllowed() { return !printingInhibited; }
+    public void inhibitPrinting() { printingInhibited=true; }
+    public synchronized boolean setEnabled(boolean requested) {
+        inhibitPrinting();invalidate();
+        try {
+            Mode restored=requested?store.loadMode():mode;
+            if(restored==null)throw new IllegalStateException("Print mode unconfirmed");
+            if(!store.saveEnabled(requested)){settingsFailed=true;return false;}
+            mode=restored;
+        }catch(Exception|LinkageError ignored){settingsFailed=true;return false;}
+        enabled=requested;settingsFailed=false;printingInhibited=!requested;
+        return true;
+    }
     /** Call off the UI thread. Failed/uncertain saves revoke automatic permission conservatively. */
     public synchronized boolean setMode(Mode requested) {
         if (requested == null) throw new IllegalArgumentException("Mode required");
         try {
-            if (!store.saveMode(requested)) { fresh = false; return false; }
-        } catch (Exception | LinkageError ignored) { fresh = false; return false; }
+            if (!store.saveMode(requested)) { fresh = false; settingsFailed=true;inhibitPrinting();return false; }
+        } catch (Exception | LinkageError ignored) { fresh = false;settingsFailed=true;inhibitPrinting();return false; }
         if (mode != requested) invalidate();
         mode = requested;
         return true;
@@ -60,6 +84,7 @@ public final class AutoPrintPolicy {
     /** Off UI thread: persists reservation BEFORE submit. Never an automatic retry entry. */
     public synchronized Attempt tryAutomaticPrint(Verification flow, ReceiptPrintController printing,
             CheckInReceipt.Layout layout) {
+        if(!printingAllowed()){fresh=false;return attempt(Reason.PRINT_DISABLED,null,false);}
         if (mode != Mode.AUTOMATIC) return attempt(Reason.MANUAL_MODE, null, false);
         if (!fresh) return attempt(Reason.NOT_FRESH, null, false);
         if (flow == null || flow != owner) return attempt(Reason.STALE_SESSION, null, false);
@@ -83,6 +108,7 @@ public final class AutoPrintPolicy {
         if (claim == Claim.ALREADY_CLAIMED) return attempt(Reason.ALREADY_CLAIMED, null, simulation);
         if (claim != Claim.CLAIMED) return attempt(Reason.STORE_FAILED, null, simulation);
         try {
+            if(!printingAllowed())return attempt(Reason.PRINT_DISABLED,null,simulation);
             // Controller rechecks current document and TEST/LIVE transport mode after the disk write.
             String jobId = printing.submit(document, layout);
             return attempt(Reason.DISPATCHED_UNCONFIRMED, jobId, simulation);
@@ -95,6 +121,7 @@ public final class AutoPrintPolicy {
      * Caller then invokes existing controller.submit; no transport is called by this method.
      */
     public synchronized boolean beforeManualPrint(Verification flow) {
+        if(!printingAllowed())return false;
         if (flow == null) return false;
         Verification.Snapshot snapshot = flow.snapshot();
         if (currentDocument(flow, snapshot) == null) return false;

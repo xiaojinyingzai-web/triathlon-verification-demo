@@ -70,10 +70,15 @@ public final class CefkReceiptTransport implements ReceiptPrintController.Transp
   if(failure==null)job.reply.accepted();else job.reply.failed(failure);
  }
  public void cancel(String id){synchronized(lock){if(active!=null&&active.id.equals(id)){active.cancelled=true;printer.invalidate();}}}
- public boolean authorizeRetry(String sessionId,boolean possibleDuplicateAcknowledged){
+ @Override public boolean authorizeRetry(String sessionId,boolean possibleDuplicateAcknowledged){
   Verification owner;synchronized(lock){owner=flow;}
   if(!possibleDuplicateAcknowledged||owner==null)return false;
-  synchronized(owner){if(CheckInReceipt.prepare(owner,sessionId)==null)return false;synchronized(lock){return !closed&&active==null&&printer.authorizeRetry(sessionId);}}
+  synchronized(owner){if(CheckInReceipt.prepare(owner,sessionId)==null)return false;synchronized(lock){
+   if(closed||active!=null)return false;
+   // A first attempt may fail before send() arms the port (e.g. not connected).
+   printer.arm(sessionId);
+   return printer.authorizeRetry(sessionId);
+  }}
  }
  public void close(){
   synchronized(lock){if(closed)return;closed=true;if(active!=null)active.cancelled=true;printer.invalidate();}

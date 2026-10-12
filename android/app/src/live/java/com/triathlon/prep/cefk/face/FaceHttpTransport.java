@@ -22,12 +22,15 @@ public final class FaceHttpTransport implements FaceClient.Transport {
         config.check();if(config.mode!=FaceClient.Mode.REAL||codec==null||maxResponseBytes<=0)throw new FaceClient.Failure(FaceClient.Error.UNAVAILABLE);
         cancel.check();
         HttpURLConnection connection=(HttpURLConnection)new URL(config.endpoint).openConnection();
+        FaceClient.Cancellation.Registration abort=cancel.onCancel(connection::disconnect);
+        byte[] body=null;
+        try {
+        cancel.check();
         connection.setInstanceFollowRedirects(false);connection.setConnectTimeout(timeout);connection.setReadTimeout(timeout);
         connection.setRequestMethod("POST");connection.setDoOutput(true);
         connection.setRequestProperty("Content-Type","application/json; charset=UTF-8");
         connection.setRequestProperty("Accept","application/json");
-        byte[] body=codec.encode(request).getBytes(StandardCharsets.UTF_8);connection.setFixedLengthStreamingMode(body.length);
-        try {
+        body=codec.encode(request).getBytes(StandardCharsets.UTF_8);connection.setFixedLengthStreamingMode(body.length);
             cancel.check();try(OutputStream out=connection.getOutputStream()){out.write(body);}
             cancel.check();int status=connection.getResponseCode();if(status<200||status>=300)throw new IOException("HTTP_FAILURE");
             ByteArrayOutputStream buffer=new ByteArrayOutputStream();
@@ -37,6 +40,6 @@ public final class FaceHttpTransport implements FaceClient.Transport {
             }
             cancel.check();try{return codec.decode(new String(buffer.toByteArray(),StandardCharsets.UTF_8));}
             catch(Exception malformed){throw new FaceClient.Failure(FaceClient.Error.PROTOCOL);}
-        }finally{java.util.Arrays.fill(body,(byte)0);connection.disconnect();}
+        }finally{abort.remove();if(body!=null)java.util.Arrays.fill(body,(byte)0);connection.disconnect();}
     }
 }

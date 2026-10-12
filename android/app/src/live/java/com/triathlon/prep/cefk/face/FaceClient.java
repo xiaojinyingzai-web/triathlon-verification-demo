@@ -59,7 +59,21 @@ public final class FaceClient {
     }
     public static final class Cancellation {
         private volatile boolean cancelled;
-        public void cancel() { cancelled=true; }
+        private final Set<Runnable> actions=new LinkedHashSet<>();
+        interface Registration { void remove(); }
+        /** Registration and cancellation share a lock; late registrants are aborted immediately. */
+        Registration onCancel(Runnable action) {
+            boolean run;
+            synchronized(this){run=cancelled;if(!run)actions.add(action);}
+            if(run)runAction(action);
+            return ()->{synchronized(Cancellation.this){actions.remove(action);}};
+        }
+        public void cancel() {
+            List<Runnable> pending;
+            synchronized(this){if(cancelled)return;cancelled=true;pending=new ArrayList<>(actions);actions.clear();}
+            for(Runnable action:pending)runAction(action);
+        }
+        private static void runAction(Runnable action){try{action.run();}catch(RuntimeException ignored){}}
         public boolean isCancelled() { return cancelled; }
         void check() throws Failure { if(cancelled||Thread.currentThread().isInterrupted()) throw new Failure(Error.CANCELLED); }
     }
@@ -80,12 +94,26 @@ public final class FaceClient {
     private final Clock clock;
     private final Map<Operation,Token> tokens=new EnumMap<>(Operation.class);
     private final ExecutorService worker=Executors.newSingleThreadExecutor(r->{Thread t=new Thread(r,"cefk-face");t.setDaemon(true);return t;});
-    private boolean closed;
+    private volatile boolean closed;
+    private final Object lifecycle=new Object();
+    private Cancellation active;
     public FaceClient(Config config,CredentialsProvider credentials,Transport transport,Clock clock) {
         this.config=config;this.credentials=credentials;this.transport=transport;this.clock=clock;
     }
     /** Run on a background caller. Serialization prevents overlapping requests/token mutation. */
     public synchronized Scores execute(Operation op,byte[][] images,Cancellation cancellation) throws Failure {
+        if(cancellation==null)throw new Failure(Error.INVALID_INPUT);
+        Cancellation owned=new Cancellation();
+        Cancellation.Registration link=cancellation.onCancel(owned::cancel);
+        synchronized(lifecycle){if(closed){link.remove();throw new Failure(Error.UNAVAILABLE);}active=owned;}
+        try{return executeOwned(op,images,owned);}
+        finally{
+            link.remove();
+            synchronized(lifecycle){if(active==owned)active=null;}
+            if(closed)tokens.clear();
+        }
+    }
+    private Scores executeOwned(Operation op,byte[][] images,Cancellation cancellation) throws Failure {
         if(closed||config==null||transport==null||clock==null||credentials==null) throw new Failure(Error.UNAVAILABLE);
         config.check(); if(transport.mode()!=config.mode) throw new Failure(Error.UNAVAILABLE);
         if(cancellation==null||op==null) throw new Failure(Error.INVALID_INPUT);
@@ -131,9 +159,14 @@ public final class FaceClient {
         cancellation.check();return new Scores(op,config.mode,live,face,quality);
     }
     private Map<String,Object> call(Map<String,Object> request,Cancellation cancel) throws Failure {
-        cancel.check();Future<Map<String,Object>> future=worker.submit(()->transport.post(request,config.timeoutMs,cancel));
+        cancel.check();Cancellation io=new Cancellation();
+        Cancellation.Registration link=cancel.onCancel(io::cancel);
+        Future<Map<String,Object>> future=null;
         long deadline=System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(config.timeoutMs);
         try {
+            io.check();
+            try{future=worker.submit(()->transport.post(request,config.timeoutMs,io));}
+            catch(RejectedExecutionException closedWorker){throw new Failure(closed?Error.CANCELLED:Error.UNAVAILABLE);}
             for(;;) {
                 cancel.check();long remaining=deadline-System.nanoTime();if(remaining<=0)throw new Failure(Error.TIMEOUT);
                 try {Map<String,Object> result=future.get(Math.min(remaining,TimeUnit.MILLISECONDS.toNanos(20)),TimeUnit.NANOSECONDS);
@@ -141,9 +174,13 @@ public final class FaceClient {
                 }catch(TimeoutException polling) { }
             }
         }catch(InterruptedException e){Thread.currentThread().interrupt();throw new Failure(Error.CANCELLED);
-        }catch(ExecutionException e){if(e.getCause() instanceof Failure)throw (Failure)e.getCause();
+        }catch(ExecutionException e){cancel.check();if(e.getCause() instanceof Failure)throw (Failure)e.getCause();
             throw new Failure(e.getCause() instanceof java.net.SocketTimeoutException?Error.TIMEOUT:Error.TRANSPORT);
-        }finally{if(!future.isDone())future.cancel(true);}
+        }finally{
+            link.remove();
+            // Future.cancel only interrupts Java code. Cancellation actively aborts the connection.
+            if(future!=null&&!future.isDone()){io.cancel();future.cancel(true);}
+        }
     }
     private static void checkReply(Map<String,Object> r,String expected,boolean auth) throws Failure {
         if(r==null||!(r.get("code") instanceof String)||(auth&&!expected.equals(r.get("type")))
@@ -163,5 +200,12 @@ public final class FaceClient {
     }
     private static boolean present(String s){return s!=null&&!s.trim().isEmpty();}
     public synchronized void invalidateTokens(){tokens.clear();}
-    public synchronized void close(){closed=true;tokens.clear();worker.shutdownNow();}
+    public void close(){
+        Cancellation owned;
+        synchronized(lifecycle){closed=true;owned=active;}
+        if(owned!=null)owned.cancel();
+        worker.shutdownNow();
+        // Never wait on execute's monitor while it owns blocked I/O.
+        if(owned==null){synchronized(this){tokens.clear();}}
+    }
 }

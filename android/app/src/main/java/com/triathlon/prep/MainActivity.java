@@ -39,6 +39,11 @@ import com.triathlon.prep.ui.ReceiptNameControl;
 import com.triathlon.prep.ui.DisplayRoleControl;
 import com.triathlon.prep.ui.AthleteView;
 import com.triathlon.prep.ui.AutomaticIntakeControl;
+import com.triathlon.prep.ui.SpeechControl;
+import com.triathlon.prep.speech.*;
+import java.util.Map;
+import java.util.LinkedHashMap;
+import java.util.function.UnaryOperator;
 import com.triathlon.prep.intake.AutoCardIntake;
 import com.triathlon.prep.intake.PreferencesCardFence;
 import com.triathlon.prep.intake.TestCardSource;
@@ -129,7 +134,10 @@ public final class MainActivity extends Activity {
             @Override public void onCancel() {
                 if (visible) {clearDisplay();host.act(VerificationView.PrimaryAction.NONE, true);}
             }
-        },requested->{if(visible)host.changePrintMode(requested);},()->{if(visible)host.recheckCard();});
+        },new PrintModeControl.Actions(){
+            public void onModeChangeRequested(PrintModeControl.Mode requested){if(visible)host.changePrintMode(requested);}
+            public void onEnabledChangeRequested(boolean enabled){if(visible)host.changePrintEnabled(enabled);}
+        },()->{if(visible)host.recheckCard();});
         recordsScreen = new RecordsView(uiContext, new RecordsView.Actions() {
             public void onBack() { if (visible) host.showMain(); }
             public void onFilterChanged(RecordsView.Filter filter) { if (visible) host.filter(filter); }
@@ -137,7 +145,12 @@ public final class MainActivity extends Activity {
             public void onCloseDetail() { if (visible) host.select(null); }
         });
         settingsScreen = new SettingsView(uiContext, () -> { if (visible) host.showMain(); },
-                () -> { if (visible) host.openDiagnostics(); },draft->{if(visible)host.changeReceiptName(draft);},this::assignDisplays);
+                () -> { if (visible) host.openDiagnostics(); },draft->{if(visible)host.changeReceiptName(draft);},this::assignDisplays,new SpeechControl.Actions(){
+                    public void onEnabledRequested(boolean enabled){if(visible)host.changeSpeechEnabled(enabled);}
+                    public void onVolumeRequested(int volume){if(visible)host.changeSpeechVolume(volume);}
+                    public void onTextsSaveRequested(Map<SpeechSettings.Scene,String> drafts){if(visible)host.changeSpeechTexts(drafts);}
+                    public void onPreviewRequested(SpeechSettings.Scene scene,String draft,int volume){if(visible)host.previewSpeech(scene,draft,volume);}
+                });
         diagnosticsScreen = new DiagnosticsView(uiContext, new DiagnosticsView.Actions() {
             public void onBack() { if (visible) host.showSettings(); }
             public void onRefresh() { if (visible) host.refreshDiagnostics(); }
@@ -220,7 +233,7 @@ public final class MainActivity extends Activity {
     }
     private void bindHost(){
         host.beforeAdmission=()->{clearDisplay();if(activeDisplay!=null)activeDisplay.arm();};
-        host.bind((model, records, settings, diagnostics, page, canOpen, state, display,roster,receipt,printMode,receiptName,intakeModel) -> {
+        host.bind((model, records, settings, diagnostics, page, canOpen, state, display,roster,receipt,printMode,receiptName,intakeModel,speechModel) -> {
             if (!visible || isDestroyed()) return;
             renderAthlete(state);renderRoles();
             if(!staffAvailable)return;
@@ -240,7 +253,7 @@ public final class MainActivity extends Activity {
             rosterEntry.setEnabled(canOpen);
             receiptEntry.setEnabled(receipt!=null&&receipt.document!=null);
             if (page == Page.RECORDS) recordsScreen.render(records);
-            else if (page == Page.SETTINGS) {settingsScreen.render(settings);settingsScreen.renderReceiptName(receiptName);settingsScreen.renderDisplayRoles(roleModel());}
+            else if (page == Page.SETTINGS) {settingsScreen.render(settings);settingsScreen.renderReceiptName(receiptName);settingsScreen.renderDisplayRoles(roleModel());settingsScreen.renderSpeech(speechModel);}
             else if (page == Page.DIAGNOSTICS) diagnosticsScreen.render(diagnostics);
             else if(page==Page.ROSTER)rosterScreen.render(roster);
             else if(page==Page.RECEIPT&&receipt!=null){receiptScreen.bindSession(receipt.sessionId);receiptScreen.render(receipt);}
@@ -306,11 +319,16 @@ public final class MainActivity extends Activity {
         android.widget.ScrollView scroll=new android.widget.ScrollView(context);scroll.setFillViewport(true);scroll.addView(setupScreen);return scroll;
     }
     private void syncWindows(){
+        View previousStaffRoot=staffRoot;
+        boolean previouslyAvailable=staffAvailable;
         displayRoutes.refresh();
         String next=displayRoutes.roles.staff()+"/"+displayRoutes.roles.athlete();
         if(!routeKey.equals(next)){if(!routeKey.isEmpty()&&!routeKey.equals("null/null")&&next.equals("null/null"))host.routeBlocked=true;clearDisplay();routeKey=next;host.refreshDisplay();}
         if(!windows.sync(displayRoutes.roles))roleStatus=DisplayRoleControl.Status.FAILED;
         staffAvailable=staffRoot!=null&&staffRoot.isAttachedToWindow();
+        // A skipped snapshot still occupies Host's dedup key. A new/just-attached staff window
+        // must receive current models even when the business state itself has not changed.
+        if(staffAvailable&&(!previouslyAvailable||previousStaffRoot!=staffRoot))host.refreshDisplay();
     }
     private void assignDisplays(Integer staff,Integer athlete){
         if(!visible||!host.mayAssignDisplays())return;
@@ -338,7 +356,7 @@ public final class MainActivity extends Activity {
     private interface Sink {
         void show(VerificationView.Model model, RecordsView.Model records,
                 SettingsView.Model settings, DiagnosticsView.Model diagnostics, Page page, boolean canOpen,
-                Verification.Snapshot state,VerificationDisplay display,RosterImportView.Model roster,ReceiptPreviewView.Model receipt,PrintModeControl.Model printMode,ReceiptNameControl.Model receiptName,AutomaticIntakeControl.Model intakeModel);
+                Verification.Snapshot state,VerificationDisplay display,RosterImportView.Model roster,ReceiptPreviewView.Model receipt,PrintModeControl.Model printMode,ReceiptNameControl.Model receiptName,AutomaticIntakeControl.Model intakeModel,SpeechControl.Model speechModel);
                 
     }
 
@@ -348,13 +366,48 @@ public final class MainActivity extends Activity {
         private final Handler main = new Handler(Looper.getMainLooper());
         private Verification flow;
         private VerificationRuntime runtime;
-        private AutoPrintPolicy autoPrint;
+        private volatile AutoPrintPolicy autoPrint;
         private AutoCardIntake intake;
         private volatile Runnable beforeAdmission;
         private String businessKey="";
         private int syntheticIndex;
         private volatile boolean shuttingDown;
         private volatile boolean routeBlocked;
+        private SpeechSetting speechSettings;
+        private SpeechPolicy speech;
+        private SpeechPort speechPort;
+        private SpeechControl.SaveStatus speechStatus=SpeechControl.SaveStatus.LOADING;
+        private String speechNotice="";
+        private long speechRevision;
+        private void speechChanged(){if(!shuttingDown)try{worker.execute(()->{speechRevision++;publishedKey=null;publish();});}catch(java.util.concurrent.RejectedExecutionException ignored){}}
+        private void initializeSpeech(){
+            try{speechSettings=new SpeechSetting(new SpeechPreferences(app));speechPort=new AndroidSpeechPort(app,this::speechChanged);speech=new SpeechPolicy(speechSettings.current(),speechPort,this::speechChanged);speechStatus=speechSettings.readFailed()?SpeechControl.SaveStatus.FAILED:SpeechControl.SaveStatus.READY;if(speechSettings.readFailed())speechNotice="已保存语音设置读取失败；自动播报关闭，可重新保存设置。";}
+            catch(RuntimeException|LinkageError ex){speechStatus=SpeechControl.SaveStatus.FAILED;speechNotice="语音初始化失败；核验可照常进行。";}
+            speechRevision++;
+        }
+        private SpeechControl.Model speechModel(){
+            SpeechSettings confirmed=speechSettings==null?SpeechSettings.defaults():speechSettings.current();
+            SpeechPort.Readiness ready=speechPort==null?SpeechPort.Readiness.FAILED:speechPort.readiness();
+            boolean edit=sink!=null&&page==Page.SETTINGS&&speechSettings!=null&&canChangePrintMode()&&speechStatus!=SpeechControl.SaveStatus.LOADING&&speechStatus!=SpeechControl.SaveStatus.SAVING;
+            return new SpeechControl.Model(confirmed,speechStatus,ready,speech==null?SpeechPort.Progress.IDLE:speech.progress(),speechNotice,speechRevision,edit,edit&&ready==SpeechPort.Readiness.READY&&confirmed.volumePercent>0);
+        }
+        void changeSpeechEnabled(boolean enabled){saveSpeech(old->new SpeechSettings(enabled,old.volumePercent,old.texts()));}
+        void changeSpeechVolume(int volume){saveSpeech(old->new SpeechSettings(old.enabled,volume,old.texts()));}
+        void changeSpeechTexts(Map<SpeechSettings.Scene,String> drafts){final Map<SpeechSettings.Scene,String> copy=drafts==null?null:new LinkedHashMap<>(drafts);saveSpeech(old->new SpeechSettings(old.enabled,old.volumePercent,copy));}
+        private void saveSpeech(UnaryOperator<SpeechSettings> change){worker.execute(()->{
+            if(speechSettings==null||sink==null||page!=Page.SETTINGS||!canChangePrintMode()){speechStatus=SpeechControl.SaveStatus.FAILED;speechNotice="当前不能修改语音设置；请返回设置页重试。";speechRevision++;publish();return;}
+            try{SpeechSettings next=change.apply(speechSettings.current());speechStatus=SpeechControl.SaveStatus.SAVING;speechNotice="";speechRevision++;publish();
+                if(speechSettings.save(next)){if(speech!=null)speech.settings(next);speechStatus=SpeechControl.SaveStatus.READY;speechNotice="语音设置已保存；开启仅影响后续新事件。";}
+                else{speechStatus=SpeechControl.SaveStatus.FAILED;speechNotice="语音设置保存失败；沿用已确认值。";}
+            }catch(IllegalArgumentException ex){speechStatus=SpeechControl.SaveStatus.FAILED;speechNotice="文字最多100个Unicode字符，不能包含控制字符；音量须为0–100%。";}
+            finally{speechRevision++;publishedKey=null;publish();}
+        });}
+        void previewSpeech(SpeechSettings.Scene scene,String draft,int volume){worker.execute(()->{
+            if(speech==null||sink==null||page!=Page.SETTINGS||!canChangePrintMode())return;
+            try{speech.preview(scene,draft,volume,Adapters.mode()==Verification.Mode.TEST,true);speechNotice="人工试听当前文字；未保存设置或创建核验记录。";}
+            catch(IllegalArgumentException ex){speechNotice="试听文字或音量无效；未提交语音。";}
+            speechRevision++;publishedKey=null;publish();
+        });}
         private volatile boolean neutralActivity;
         private void intakeChanged(){if(!shuttingDown)try{worker.execute(()->{publishedKey=null;publish();});}catch(java.util.concurrent.RejectedExecutionException ignored){}}
         private void admitted(AutoCardIntake.Admission admission){
@@ -417,8 +470,11 @@ public final class MainActivity extends Activity {
         private volatile ReceiptNameControl.Model nameModel=new ReceiptNameControl.Model("",ReceiptNameControl.Status.LOADING,40,false,"正在读取小票名称设置。");
         private long nameRevision;
         private final AtomicBoolean modeSaving=new AtomicBoolean();
+        private final AtomicBoolean printSwitchSaving=new AtomicBoolean();
+        private PrintModeControl.Status printSwitchStatus=PrintModeControl.Status.LOADING;
+        private Boolean requestedPrintEnabled;
         private volatile PrintModeControl.Status modeStatus=PrintModeControl.Status.LOADING;
-        private volatile PrintModeControl.Model modeModel=new PrintModeControl.Model(PrintModeControl.Mode.MANUAL,null,PrintModeControl.Status.LOADING,false,"正在读取已保存模式。");
+        private volatile PrintModeControl.Model modeModel=new PrintModeControl.Model(PrintModeControl.Mode.MANUAL,null,PrintModeControl.Status.LOADING,false,"正在读取打印设置。",false,null,PrintModeControl.Status.LOADING,false,false);
         private PrintModeControl.Mode requestedMode;
         private long modeRevision;
         private FileRecordStore store;
@@ -447,6 +503,7 @@ public final class MainActivity extends Activity {
         Host(Context app) {
             this.app = app;
             worker.execute(() -> {
+                if(shuttingDown)return;
                 try {
                     PackageInfo info = app.getPackageManager().getPackageInfo(app.getPackageName(), 0);
                     long versionCode = Build.VERSION.SDK_INT >= 28 ? info.getLongVersionCode() : info.versionCode;
@@ -463,14 +520,18 @@ public final class MainActivity extends Activity {
                     receiptNames=new ReceiptNameSetting(new ReceiptNamePreferences(app));
                     runtime.setReceiptHeading(receiptNames.override());
                     nameStatus=receiptNames.readFailed()?ReceiptNameControl.Status.FAILED:ReceiptNameControl.Status.READY;nameRevision++;
-                    autoPrint=new AutoPrintPolicy(new PrintModePreferences(app));modeStatus=PrintModeControl.Status.READY;modeRevision++;
+                    autoPrint=new AutoPrintPolicy(new PrintModePreferences(app));
+                    runtime.printing.setPrintPermission(autoPrint::printingAllowed);
+                    modeStatus=autoPrint.settingsFailed()?PrintModeControl.Status.FAILED:PrintModeControl.Status.READY;
+                    printSwitchStatus=modeStatus;modeRevision++;
                     cameraPermissionEligible=Adapters.mode()==Verification.Mode.LIVE&&runtime.canBegin();
                     if(runtime.canBegin()&&runtime.inbox!=null&&runtime.cardSource!=null)intake=new AutoCardIntake(Adapters.mode(),runtime.cardSource,new PreferencesCardFence(app),new AutoCardIntake.Listener(){
                         public void admitted(AutoCardIntake.Admission admission){Host.this.admitted(admission);}
                         public void changed(AutoCardIntake.Snapshot value){intakeChanged();}
                     },15000);
                 } catch (Exception | LinkageError ex) { problem = "配置、应用信息或日志初始化失败，核验操作未启用；请检查准备配置与私有存储。"; }
-                publish();
+                if(!shuttingDown)initializeSpeech();
+                if(!shuttingDown)publish();
             });
         }
         void bind(Sink current) {
@@ -479,6 +540,7 @@ public final class MainActivity extends Activity {
         }
         void unbindAndCancel() {
             sink = null;
+            if(speech!=null)speech.cancel();
             if(intake!=null)intake.pause();
             worker.execute(() -> { if(runtime!=null&&runtime.inbox!=null)runtime.inbox.clear();if(autoPrint!=null)autoPrint.invalidate();if(runtime!=null)runtime.printing.cancel();if(page==Page.RECEIPT)page=Page.MAIN;if (flow != null) flow.cancel(); });
         }
@@ -509,20 +571,38 @@ public final class MainActivity extends Activity {
             if(requested==null||!modeSaving.compareAndSet(false,true))return;
             worker.execute(()->{
                 try{
-                    if(!canChangePrintMode())return;
+                    if(!canChangePrintMode()||!autoPrint.printingAllowed()||printSwitchSaving.get())return;
                     AutoPrintPolicy.Mode selected=requested==PrintModeControl.Mode.AUTO?AutoPrintPolicy.Mode.AUTOMATIC:AutoPrintPolicy.Mode.MANUAL;
                     if(autoPrint.mode()==selected)return;
                     requestedMode=requested;modeStatus=PrintModeControl.Status.SAVING;modeRevision++;publish();
                     boolean saved=autoPrint.setMode(selected);
                     requestedMode=null;modeStatus=saved?PrintModeControl.Status.READY:PrintModeControl.Status.FAILED;
+                    if(!saved)printSwitchStatus=PrintModeControl.Status.FAILED;
                 }finally{modeSaving.set(false);modeRevision++;publishedKey=null;publish();}
             });
         }
+        /** Available during verification and in-flight sends; it never cancels verification or a device job. */
+        void changePrintEnabled(boolean requested){
+            AutoPrintPolicy policy=autoPrint;
+            if(shuttingDown||policy==null||!printSwitchSaving.compareAndSet(false,true))return;
+            policy.inhibitPrinting();
+            worker.execute(()->{try{
+                requestedPrintEnabled=requested;printSwitchStatus=PrintModeControl.Status.SAVING;modeRevision++;publish();
+                boolean saved=policy.setEnabled(requested);
+                requestedPrintEnabled=null;printSwitchStatus=saved?PrintModeControl.Status.READY:PrintModeControl.Status.FAILED;
+                if(saved&&requested)modeStatus=PrintModeControl.Status.READY;
+            }finally{printSwitchSaving.set(false);modeRevision++;publishedKey=null;publish();}});
+        }
         private PrintModeControl.Model printMode(){
             PrintModeControl.Mode confirmed=autoPrint!=null&&autoPrint.mode()==AutoPrintPolicy.Mode.AUTOMATIC?PrintModeControl.Mode.AUTO:PrintModeControl.Mode.MANUAL;
-            boolean enabled=!modeSaving.get()&&!nameSaving.get()&&canChangePrintMode()&&modeStatus!=PrintModeControl.Status.LOADING;
+            boolean allowed=autoPrint!=null&&autoPrint.printingAllowed();
+            boolean enabled=allowed&&!printSwitchSaving.get()&&!modeSaving.get()&&!nameSaving.get()&&canChangePrintMode()&&modeStatus!=PrintModeControl.Status.LOADING;
             String notice=modeStatus==PrintModeControl.Status.FAILED?"模式保存失败，仍按上次确认设置；请重试。":!enabled&&modeStatus==PrintModeControl.Status.READY?"请完成当前核验或打印后切换模式。":Adapters.mode()==Verification.Mode.TEST?"虚构测试：仅模拟打印，设置不会连接真实打印机。":"自动仅新核验通过并保存后提交一次；实际出纸待确认。";
-            return new PrintModeControl.Model(confirmed,requestedMode,modeStatus,enabled,notice);
+            if(printSwitchStatus==PrintModeControl.Status.FAILED)notice="打印设置读取或保存失败，已阻止新打印；请重试开关。";
+            else notice="只阻止新提交；已交设备的任务可能继续出纸。重新开启不补印旧结果。"+(Adapters.mode()==Verification.Mode.TEST?" TEST仅模拟。":"");
+            boolean toggle=!shuttingDown&&autoPrint!=null&&!printSwitchSaving.get()&&!modeSaving.get()&&printSwitchStatus!=PrintModeControl.Status.LOADING;
+            return new PrintModeControl.Model(confirmed,requestedMode,modeStatus,enabled,notice,
+                autoPrint!=null&&autoPrint.enabled(),requestedPrintEnabled,printSwitchStatus,toggle,allowed);
         }
         boolean mayRequestCamera(){return cameraPermissionEligible;}
         boolean mayAssignDisplays(){
@@ -559,11 +639,14 @@ public final class MainActivity extends Activity {
             page=Page.RECEIPT;publishedKey=null;publish();
         });}
         void printReceipt(String id,boolean retry){worker.execute(()->{
-            if(page!=Page.RECEIPT||runtime==null||flow==null||!flow.snapshot().sessionId.equals(id))return;
-            ReceiptPreviewView.Model model=ReceiptPresenter.model(flow,runtime.printing,runtime.printLayout,runtime.receiptHeading());
+            if(shuttingDown||autoPrint==null||!autoPrint.printingAllowed()||page!=Page.RECEIPT||runtime==null||flow==null||!flow.snapshot().sessionId.equals(id))return;
+            ReceiptPreviewView.Model model=ReceiptPresenter.model(flow,runtime.printing,runtime.printLayout,runtime.receiptHeading(),autoPrint.printingAllowed());
             if(retry?!model.retryEnabled:!model.printEnabled)return;
             CheckInReceipt.Document document=ReceiptPresenter.current(flow,id,runtime.receiptHeading());
             if(document==null||runtime.printLayout==null||autoPrint==null||!autoPrint.beforeManualPrint(flow))return;
+            // The existing reprint/retry UI asks the operator to assess possible duplicate output.
+            // Automatic dispatch never enters this explicit renewal path.
+            if(model.status!=ReceiptPrintController.Status.IDLE&&!runtime.printing.authorizeRetry(id,true))return;
             try{runtime.printing.submit(document,runtime.printLayout);}
             catch(IllegalStateException ex){/* A changed session is rejected by the controller; refresh from current state. */}
             publishedKey=null;publish();
@@ -579,7 +662,17 @@ public final class MainActivity extends Activity {
         });}
         private boolean canReplaceRoster(){Verification.Snapshot s=flow==null?null:flow.snapshot();return s!=null&&s.stage==Verification.Stage.IDLE&&s.saveState!=Verification.SaveState.FAILED;}
         private void reloadRoster(){try{currentRoster=rosterStore.current();rosterCorrupt=false;}catch(Exception ex){currentRoster=null;rosterCorrupt=true;}}
-        void openRoster(){worker.execute(()->{if(page!=Page.MAIN||rosterImport==null||!SettingsPresenter.canOpen(flow==null?null:flow.snapshot()))return;page=Page.ROSTER;reloadRoster();rosterRevision++;publish();});}
+        void openRoster(){worker.execute(()->{
+            if(page!=Page.MAIN||rosterImport==null||runtime==null||!SettingsPresenter.canOpen(flow==null?null:flow.snapshot())
+                    ||runtime.printing.snapshot().status==ReceiptPrintController.Status.SENDING)return;
+            // Explicit roster management ends only a saved terminal session, without changing auto-next.
+            if(intake!=null)intake.pause();
+            if(runtime.inbox!=null)runtime.inbox.clear();
+            if(autoPrint!=null)autoPrint.invalidate();
+            runtime.printing.cancel();
+            if(flow.snapshot().stage==Verification.Stage.FINISHED)flow.next();
+            page=Page.ROSTER;reloadRoster();rosterRevision++;publish();
+        });}
         void beginChoice(String event,String group,Consumer<String> launch){worker.execute(()->{
             if(page!=Page.ROSTER||!canReplaceRoster()||rosterState==RosterImportView.State.READING||rosterState==RosterImportView.State.SAVING)return;
             if(rosterImport.candidate()!=null)rosterImport.discard(rosterImport.candidate().id);
@@ -669,9 +762,11 @@ public final class MainActivity extends Activity {
             modeModel=printMode();
             nameModel=receiptName();
             Verification.Snapshot state = flow == null ? null : flow.snapshot();
+            if(speech!=null)speech.observe(SpeechPolicy.Frame.from(state,sink!=null&&page==Page.MAIN&&!routeBlocked,waitingForCard()));
+            SpeechControl.Model voiceModel=speechModel();
             ReceiptPrintController.Snapshot print=runtime==null?null:runtime.printing.snapshot();
             String key = (state == null ? "initializing" : state.sessionId + "/" + state.stage + "/" + state.saveState)
-                    + "/" + problem + "/" + page + "/" + recordsRevision + "/" + diagnosticsRevision+"/"+rosterRevision+"/"+modeRevision+"/"+nameRevision+"/"+(print==null?"":print.jobId+"/"+print.status+"/"+print.failure);
+                    + "/" + problem + "/" + page + "/" + recordsRevision + "/" + diagnosticsRevision+"/"+rosterRevision+"/"+modeRevision+"/"+nameRevision+"/"+speechRevision+"/"+(print==null?"":print.jobId+"/"+print.status+"/"+print.failure);
             if (key.equals(publishedKey)) return;
             publishedKey = key;
             RecordsView.Model recordsModel = page == Page.RECORDS ? RecordsPresenter.model(records,
@@ -689,9 +784,9 @@ public final class MainActivity extends Activity {
                 // Re-read the synchronized core here: an older queued IDLE render must not erase newly accepted images.
                 Verification.Snapshot latest=flow==null?null:flow.snapshot();
                 VerificationView.Model latestModel=VerificationPresenter.model(latest,Adapters.mode(),problem,runtime!=null && runtime.canBegin()&&!modeSaving.get()&&!nameSaving.get());
-                ReceiptPreviewView.Model receipt=flow==null||runtime==null?null:ReceiptPresenter.model(flow,runtime.printing,runtime.printLayout,runtime.receiptHeading());
+                ReceiptPreviewView.Model receipt=flow==null||runtime==null?null:ReceiptPresenter.model(flow,runtime.printing,runtime.printLayout,runtime.receiptHeading(),autoPrint!=null&&autoPrint.printingAllowed());
                 if(intake!=null)latestModel=automaticModel(latestModel,latest);
-                sink.show(latestModel,recordsModel,settingsModel,currentDiagnostics,currentPage,canOpen,latest,runtime==null?null:runtime.display,rosterModel,receipt,modeModel,nameModel,inputModel);
+                sink.show(latestModel,recordsModel,settingsModel,currentDiagnostics,currentPage,canOpen,latest,runtime==null?null:runtime.display,rosterModel,receipt,modeModel,nameModel,inputModel,voiceModel);
             });
         }
         private VerificationView.Model automaticModel(VerificationView.Model old,Verification.Snapshot state){
@@ -703,11 +798,20 @@ public final class MainActivity extends Activity {
                 standby?"刷卡后自动核验":old.instruction,old.name,old.maskedNumber,old.score,old.liveness,old.saveStatus,
                 old.certificatePhoto,old.livePhoto,action,action!=VerificationView.PrimaryAction.NONE,old.cancelEnabled,old.tone,old.rosterInfo);
         }
-        void close() {
-            shuttingDown=true;if(intake!=null)intake.close();
+        synchronized void close() {
+            if(shuttingDown)return;
+            shuttingDown=true;
+            if(autoPrint!=null)autoPrint.inhibitPrinting();
             cameraPermissionEligible=false;
             sink = null;
-            worker.execute(() -> { if (runtime != null) runtime.close();else if (flow != null) flow.cancel(); });
+            if(speech!=null)speech.cancel();
+            if(intake!=null)intake.pause();
+            // Runs after any in-flight initialization, including owners created after close() began.
+            worker.execute(() -> {
+                try{if(intake!=null)intake.close();}
+                finally{try{if(speech!=null)speech.close();else if(speechPort!=null)speechPort.close();}
+                    finally{if(runtime!=null)runtime.close();else if(flow!=null)flow.cancel();}}
+            });
             worker.shutdown();
         }
     }
