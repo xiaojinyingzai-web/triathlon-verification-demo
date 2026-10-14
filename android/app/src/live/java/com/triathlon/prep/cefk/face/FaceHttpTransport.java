@@ -14,14 +14,20 @@ public final class FaceHttpTransport implements FaceClient.Transport {
     private final FaceClient.Config config;
     private final JsonCodec codec;
     private final int maxResponseBytes;
+    interface ConnectionFactory { HttpURLConnection open() throws Exception; }
+    private final ConnectionFactory connections;
     public FaceHttpTransport(FaceClient.Config config,JsonCodec codec,int maxResponseBytes) {
+        this(config,codec,maxResponseBytes,()->(HttpURLConnection)new URL(config.endpoint).openConnection());
+    }
+    FaceHttpTransport(FaceClient.Config config,JsonCodec codec,int maxResponseBytes,ConnectionFactory connections) {
         this.config=config;this.codec=codec;this.maxResponseBytes=maxResponseBytes;
+        this.connections=connections;
     }
     public FaceClient.Mode mode(){return FaceClient.Mode.REAL;}
     public Map<String,Object> post(Map<String,Object> request,int timeout,FaceClient.Cancellation cancel) throws Exception {
         config.check();if(config.mode!=FaceClient.Mode.REAL||codec==null||maxResponseBytes<=0)throw new FaceClient.Failure(FaceClient.Error.UNAVAILABLE);
         cancel.check();
-        HttpURLConnection connection=(HttpURLConnection)new URL(config.endpoint).openConnection();
+        HttpURLConnection connection=connections.open();
         FaceClient.Cancellation.Registration abort=cancel.onCancel(connection::disconnect);
         byte[] body=null;
         try {
@@ -32,7 +38,7 @@ public final class FaceHttpTransport implements FaceClient.Transport {
         connection.setRequestProperty("Accept","application/json");
         body=codec.encode(request).getBytes(StandardCharsets.UTF_8);connection.setFixedLengthStreamingMode(body.length);
             cancel.check();try(OutputStream out=connection.getOutputStream()){out.write(body);}
-            cancel.check();int status=connection.getResponseCode();if(status<200||status>=300)throw new IOException("HTTP_FAILURE");
+            cancel.check();int status=connection.getResponseCode();if(status<200||status>=300)throw new FaceClient.Failure(FaceClient.Error.TRANSPORT,FaceClient.Stage.PREFLIGHT,status,FaceClient.VendorCode.UNCONFIRMED);
             ByteArrayOutputStream buffer=new ByteArrayOutputStream();
             try(InputStream in=connection.getInputStream()) {
                 byte[] chunk=new byte[4096];int n;

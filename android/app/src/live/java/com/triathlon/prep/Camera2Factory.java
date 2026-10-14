@@ -29,7 +29,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /** No constructor opens a camera. Caller owns preview Surface and its configured buffer dimensions. */
 public final class Camera2Factory {
     interface Opening { void open() throws Exception; }
-    private static final CameraReleaseGate RELEASE_GATE=new CameraReleaseGate();
+    static final CameraReleaseGate RELEASE_GATE=new CameraReleaseGate();
     private Camera2Factory() { }
     public static CameraModule create(Context context, Surface previewSurface, long timeoutMillis) {
         return create(context,previewSurface,timeoutMillis,()->{});
@@ -49,8 +49,11 @@ public final class Camera2Factory {
     /** API26 field references are isolated and reached only after the SDK/advertised-key guard. */
     static final class Api26 {
         static boolean hasZslControl(CameraCharacteristics characteristics) {
+            return Boolean.TRUE.equals(zslControl(characteristics));
+        }
+        static Boolean zslControl(CameraCharacteristics characteristics) {
             List<CaptureRequest.Key<?>> keys = characteristics.getAvailableCaptureRequestKeys();
-            return keys != null && keys.contains(CaptureRequest.CONTROL_ENABLE_ZSL);
+            return keys==null?null:keys.contains(CaptureRequest.CONTROL_ENABLE_ZSL);
         }
         static void disableZsl(CaptureRequest.Builder request, boolean available) throws CameraModule.Failure {
             FreshCapturePolicy.disableZsl(Build.VERSION.SDK_INT, available, new FreshCapturePolicy.Control() {
@@ -78,7 +81,9 @@ public final class Camera2Factory {
         private CameraModule.PreviewInfo orientation;
         private boolean zslControlAvailable;
         private boolean openRequested,deviceClosed,resourcesReleased;
-        private long ticket, exposure, pendingTimestamp;
+        private long ticket, pendingTimestamp,lastSensorFrame=-1,lastSensorTimestamp;
+        private final CaptureFreshnessProof freshness=new CaptureFreshnessProof();
+        private CaptureFreshnessProof.Lease activeProof;
         private byte[] pendingJpeg;
         Backend(Context app, Surface preview, CameraModule.Config config,Runnable released) {
             this.app = app; this.preview = preview; this.config = config;this.released=released;
@@ -93,10 +98,7 @@ public final class Camera2Factory {
             if (manager == null || !Arrays.asList(manager.getCameraIdList()).contains(config.cameraId))
                 throw new CameraModule.Failure(CameraModule.Error.NO_CAMERA);
             CameraCharacteristics characteristics = manager.getCameraCharacteristics(config.cameraId);
-            zslControlAvailable = Build.VERSION.SDK_INT >= 26 && Api26.hasZslControl(characteristics);
-            // Conservative compatibility: cannot guarantee request freshness without an explicit control.
-            // Fail before opening hardware, including API24/25 or missing/null available-key metadata.
-            FreshCapturePolicy.requireSupported(Build.VERSION.SDK_INT, zslControlAvailable);
+            zslControlAvailable=FreshCapturePolicy.controlled(Build.VERSION.SDK_INT,Build.VERSION.SDK_INT>=26?Api26.zslControl(characteristics):null);
             StreamConfigurationMap map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
             Integer sensor = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION);
             Integer facing = characteristics.get(CameraCharacteristics.LENS_FACING);
@@ -161,12 +163,13 @@ public final class Camera2Factory {
             try {
                 CaptureRequest.Builder request = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
                 request.addTarget(preview);
-                configured.setRepeatingRequest(request.build(), new CameraCaptureSession.CaptureCallback(){
+                final CaptureRequest repeating=request.build();
+                configured.setRepeatingRequest(repeating, new CameraCaptureSession.CaptureCallback(){
                     public void onCaptureCompleted(CameraCaptureSession source,CaptureRequest request,TotalCaptureResult result){
                         Long timestamp=result.get(TotalCaptureResult.SENSOR_TIMESTAMP);
-                        if(!closed.get()&&source==session&&timestamp!=null&&timestamp>0)events.frame(timestamp);
+                        if(!closed.get()&&source==session&&source==configured&&request==repeating&&timestamp!=null&&timestamp>0){observeSensor(result.getFrameNumber(),timestamp);events.frame(timestamp);}
                     }
-                    public void onCaptureFailed(CameraCaptureSession source,CaptureRequest request,CaptureFailure failure){fault(CameraModule.Error.DEVICE_ERROR);}
+                    public void onCaptureFailed(CameraCaptureSession source,CaptureRequest request,CaptureFailure failure){if(source==session&&request==repeating)fault(CameraModule.Error.DEVICE_ERROR);}
                 }, work);
                 events.ready(orientation);
             } catch (CameraAccessException | RuntimeException ex) { fault(CameraModule.Error.DEVICE_ERROR); }
@@ -175,32 +178,35 @@ public final class Camera2Factory {
             if (closed.get() || work == null || session == null) throw new CameraModule.Failure(CameraModule.Error.CAPTURE_FAILED);
             if (!work.post(() -> shoot(requestedTicket))) throw new CameraModule.Failure(CameraModule.Error.CAPTURE_FAILED);
         }
+        private void observeSensor(long frame,long timestamp){if(frame>lastSensorFrame&&timestamp>lastSensorTimestamp){lastSensorFrame=frame;lastSensorTimestamp=timestamp;}}
         private void shoot(long requestedTicket) {
             if (closed.get()) return;
             try {
                 Image old;
                 while ((old = images.acquireNextImage()) != null) old.close();
-                erasePending(); ticket = requestedTicket; exposure = 0;
+                erasePending(); ticket = requestedTicket;
                 CaptureRequest.Builder request = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
-                FreshCapturePolicy.requireSupported(Build.VERSION.SDK_INT, zslControlAvailable);
-                Api26.disableZsl(request, zslControlAvailable);
+                if(zslControlAvailable)Api26.disableZsl(request,true);
                 request.addTarget(images.getSurface()); request.setTag(requestedTicket);
                 request.set(CaptureRequest.JPEG_ORIENTATION, orientation.jpegOrientationDegrees);
-                session.capture(request.build(), new CameraCaptureSession.CaptureCallback() {
-                    private boolean matches(CaptureRequest request) { return request.getTag() instanceof Long && (Long)request.getTag() == ticket; }
+                final CaptureRequest submitted=request.build();final CameraCaptureSession submittedSession=session;
+                final CaptureFreshnessProof.Lease proof=freshness.begin(submittedSession,submitted,requestedTicket,zslControlAvailable,lastSensorFrame,lastSensorTimestamp);
+                activeProof=proof;final int[] sequence={-1};
+                sequence[0]=submittedSession.capture(submitted, new CameraCaptureSession.CaptureCallback() {
+                    private boolean matches(CameraCaptureSession source,CaptureRequest request) { return !closed.get()&&source==session&&freshness.matches(proof,source,request)&&request.getTag() instanceof Long&&(Long)request.getTag()==proof.ticket; }
                     public void onCaptureStarted(CameraCaptureSession source, CaptureRequest request, long timestamp, long frameNumber) {
-                        if (closed.get() || !matches(request)) return;
-                        exposure = timestamp; flushPending();
+                        if (!matches(source,request)) return;
+                        freshness.started(proof,source,request,frameNumber,timestamp);flushPending();
                     }
                     public void onCaptureCompleted(CameraCaptureSession source, CaptureRequest request, TotalCaptureResult result) {
-                        if (closed.get() || !matches(request)) return;
+                        if (!matches(source,request)) return;
                         Long timestamp = result.get(TotalCaptureResult.SENSOR_TIMESTAMP);
-                        if (exposure == 0 && timestamp != null) { exposure = timestamp; flushPending(); }
+                        if(timestamp!=null){freshness.completed(proof,source,request,result.getFrameNumber(),timestamp);observeSensor(result.getFrameNumber(),timestamp);flushPending();}
                     }
                     public void onCaptureFailed(CameraCaptureSession source, CaptureRequest request, CaptureFailure failure) {
-                        if (matches(request)) fault(CameraModule.Error.CAPTURE_FAILED);
+                        if (matches(source,request)) fault(CameraModule.Error.CAPTURE_FAILED);
                     }
-                    public void onCaptureSequenceAborted(CameraCaptureSession source, int sequence) { fault(CameraModule.Error.CAPTURE_FAILED); }
+                    public void onCaptureSequenceAborted(CameraCaptureSession source, int aborted) { if(!closed.get()&&source==session&&freshness.current(proof)&&sequence[0]>=0&&aborted==sequence[0])fault(CameraModule.Error.CAPTURE_FAILED); }
                 }, work);
             } catch (CameraModule.Failure ex) { fault(ex.error); }
             catch (SecurityException ex) { fault(CameraModule.Error.PERMISSION_DENIED); }
@@ -209,11 +215,13 @@ public final class Camera2Factory {
         private void onImage(ImageReader source) {
             Image image = null;
             try {
+                if(source!=images||closed.get())return;
                 image = source.acquireLatestImage();
-                if (image == null || closed.get() || ticket == 0) return;
+                if (image == null || closed.get() || ticket == 0||!freshness.current(activeProof)) return;
                 if (image.getFormat() != ImageFormat.JPEG || image.getPlanes().length == 0) { fault(CameraModule.Error.INVALID_IMAGE); return; }
                 long timestamp = image.getTimestamp();
-                if (timestamp <= 0 || (exposure != 0 && !CameraModule.sameExposure(exposure, timestamp))) return;
+                if(!freshness.canStage(activeProof,timestamp))return;
+                long expected=freshness.expected(activeProof);if(expected!=0&&!CameraModule.sameExposure(expected,timestamp))return;
                 ByteBuffer buffer = image.getPlanes()[0].getBuffer();
                 if (buffer.remaining() < 4 || buffer.remaining() > 8 * 1024 * 1024) { fault(CameraModule.Error.INVALID_IMAGE); return; }
                 erasePending(); pendingTimestamp = timestamp; pendingJpeg = new byte[buffer.remaining()]; buffer.get(pendingJpeg);
@@ -227,17 +235,18 @@ public final class Camera2Factory {
             flushPending();
         }
         private void flushPending() {
-            if (pendingJpeg == null || exposure == 0) return;
+            if (pendingJpeg == null || freshness.expected(activeProof)==0) return;
             byte[] jpeg = pendingJpeg; long timestamp = pendingTimestamp;
             pendingJpeg = null; pendingTimestamp = 0;
             try {
-                if (!closed.get() && CameraModule.sameExposure(exposure, timestamp)) events.image(ticket, timestamp, jpeg);
+                if (!closed.get() && freshness.acceptImage(activeProof,timestamp)) events.image(ticket, timestamp, jpeg);
             } finally { Arrays.fill(jpeg, (byte)0); }
         }
         private void erasePending() { if (pendingJpeg != null) Arrays.fill(pendingJpeg, (byte)0); pendingJpeg = null; pendingTimestamp = 0; }
-        private void fault(CameraModule.Error error) { if (!closed.get() && events != null) events.fail(error); }
+        private void fault(CameraModule.Error error) { freshness.cancel();if (!closed.get() && events != null) events.fail(error); }
         public synchronized void close() {
             if (closed.getAndSet(true)) return;
+            freshness.cancel();
             if (work != null && !work.post(this::release)) release();
             else if (work == null) release();
         }
@@ -245,6 +254,7 @@ public final class Camera2Factory {
             RELEASE_GATE.released(this);if(!releaseNotified){releaseNotified=true;released.run();}
         }}
         private void release() {
+            freshness.cancel();activeProof=null;
             erasePending();
             try { if (session != null) session.close(); }
             catch (RuntimeException ignored) { }

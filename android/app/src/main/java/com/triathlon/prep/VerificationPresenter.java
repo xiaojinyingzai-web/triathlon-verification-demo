@@ -1,6 +1,7 @@
 package com.triathlon.prep;
 
 import com.triathlon.prep.core.Verification;
+import com.triathlon.prep.core.CheckIn;
 import com.triathlon.prep.ui.VerificationView;
 
 /** Maps core snapshots to presentation; never generates verdicts or photos. */
@@ -9,6 +10,9 @@ final class VerificationPresenter {
         return model(state,mode,problem,mode==Verification.Mode.TEST);
     }
     static VerificationView.Model model(Verification.Snapshot state, Verification.Mode mode, String problem,boolean canBegin) {
+        return model(state,mode,problem,canBegin,null);
+    }
+    static VerificationView.Model model(Verification.Snapshot state, Verification.Mode mode, String problem,boolean canBegin,VerificationRuntime.FailureDiagnostic diagnostic) {
         boolean simulation = mode == Verification.Mode.TEST;
         int step = 1;
         String title = "正在初始化", message = "正在检查本地私有日志。", instruction = "请稍候";
@@ -75,10 +79,23 @@ final class VerificationPresenter {
                 default: break;
             }
         }
+        if(state!=null&&state.saveState==Verification.SaveState.SAVED&&state.checkIn==CheckIn.State.DUPLICATE){title="已报到";message="该选手已报到，请勿重复办理。本次未自动打印。";instruction="如需补打，请工作人员先核对现场出纸并明确确认。";tone=VerificationView.Tone.WARNING;}
+        if(state!=null&&state.saveState==Verification.SaveState.SAVED&&state.checkIn==CheckIn.State.UNLINKABLE){title="历史待核对";message="同一人员的历史报到记录待核对，本次未自动打印。";tone=VerificationView.Tone.WARNING;}
+        if(state!=null&&state.scoresOnly&&state.stage==Verification.Stage.FINISHED){
+            title="比对已返回，判定标准待配置";
+            message="已收到厂家分数；尚未判定核验通过，未登记成功报到。";
+            instruction="请查看本次分数，判定标准配置后再进行正式核验。";
+            score=rawScore(state.result==null?null:state.result.score);liveness=rawScore(state.liveGrade);
+            tone=VerificationView.Tone.WARNING;cancel=false;
+            if(state.saveState==Verification.SaveState.FAILED){saved="保存失败";message="未判定结果保存失败，请重试；暂不能进入下一位。";action=VerificationView.PrimaryAction.RETRY_SAVE;enabled=true;}
+            else {saved=state.saveState==Verification.SaveState.SAVED?"未判定结果已保存":"未保存";action=state.saveState==Verification.SaveState.SAVED?VerificationView.PrimaryAction.NEXT:VerificationView.PrimaryAction.NONE;enabled=state.saveState==Verification.SaveState.SAVED;}
+        }
+        if(problem==null&&diagnostic!=null&&state!=null&&state.stage==Verification.Stage.FINISHED&&state.result!=null&&state.result.error==Verification.Error.SDK_EXCEPTION){message=message+"\n"+diagnostic.text();}
         if (problem != null) { message = problem; tone = VerificationView.Tone.WARNING; }
         return new VerificationView.Model(simulation, step, title, message, instruction, name, number,
-                score, liveness, saved, null, null, action, enabled, cancel, tone,roster(state));
+                score, liveness, saved, null, null, action, enabled, cancel, tone,roster(state),state!=null&&state.scoresOnly);
     }
+    private static String rawScore(Double value){return value==null?"—":new java.text.DecimalFormat("0.##",java.text.DecimalFormatSymbols.getInstance(java.util.Locale.ROOT)).format(value);}
     private static VerificationView.RosterInfo roster(Verification.Snapshot state){
         if(state==null)return null;
         boolean current=state.stage!=Verification.Stage.IDLE&&(state.result==null||state.result.verdict!=Verification.Verdict.CANCELLED);

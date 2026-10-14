@@ -14,7 +14,7 @@ import android.widget.TextView;
 
 /** Host supplies device status; optional receipt editor submits requests without persisting. */
 public final class SettingsView extends ScrollView {
-    public interface Actions { void onBack(); }
+    public interface Actions { void onBack(); default void onOpenNextDayFace(){} default void onOpenFaceLibrary(){} }
     public static final class Model {
         public final boolean simulation;
         public final String cardReader, camera, algorithm, authorization, storage;
@@ -35,6 +35,12 @@ public final class SettingsView extends ScrollView {
     private final ReceiptNameControl receiptNameControl;
     private final DisplayRoleControl displayRoleControl;
     private final SpeechControl speechControl;
+    private final Button receiptTemplateEntry;
+    private Runnable onReceiptTemplateRequested;
+    private final Button passportEntry;
+    private Runnable onPassportCheckRequested;
+    private Button deviceConfigEntry;
+    private Runnable onDeviceConfigRequested;
 
     public SettingsView(Context context,Actions actions) {
         this(context,actions,null);
@@ -61,8 +67,15 @@ public final class SettingsView extends ScrollView {
         String[] labels={"身份证读卡模块","现场摄像头","人证比对 / 活体","算法服务配置","本地存储"};
         for(int i=0;i<labels.length;i++)statuses[i]=field(devices,labels[i],"未核实");
         add(devices,text("连接设备后核对读证照片、标准相机与在线比对服务配置。",15,MUTED,false),14);add(panel,devices,20);
+        deviceConfigEntry=button("设备配置准备",BLUE);deviceConfigEntry.setEnabled(false);deviceConfigEntry.setVisibility(android.view.View.GONE);
+        deviceConfigEntry.setOnClickListener(v->{if(onDeviceConfigRequested!=null)onDeviceConfigRequested.run();});add(panel,deviceConfigEntry,12);
+        Button nextDayEntry=button("刷脸模块状态与设置",BLUE);nextDayEntry.setOnClickListener(v->actions.onOpenNextDayFace());add(panel,nextDayEntry,12);
+        Button faceLibraryEntry=button("人脸库管理",BLUE);faceLibraryEntry.setOnClickListener(v->actions.onOpenFaceLibrary());add(panel,faceLibraryEntry,12);
         receiptNameControl=receiptNameActions==null?null:new ReceiptNameControl(context,receiptNameActions);
         if(receiptNameControl!=null){LinearLayout receipt=card();receipt.addView(receiptNameControl);add(panel,receipt,16);}
+        receiptTemplateEntry=button("小票模板设置",BLUE);receiptTemplateEntry.setEnabled(false);receiptTemplateEntry.setVisibility(android.view.View.GONE);
+        receiptTemplateEntry.setOnClickListener(v->{if(onReceiptTemplateRequested!=null)onReceiptTemplateRequested.run();});add(panel,receiptTemplateEntry,12);
+        passportEntry=button("护照人工核验",BLUE);passportEntry.setEnabled(false);passportEntry.setVisibility(android.view.View.GONE);passportEntry.setOnClickListener(v->{if(onPassportCheckRequested!=null)onPassportCheckRequested.run();});add(panel,passportEntry,12);
         displayRoleControl=displayRoleActions==null?null:new DisplayRoleControl(context,displayRoleActions);
         if(displayRoleControl!=null){LinearLayout displays=card();displays.addView(displayRoleControl);add(panel,displays,16);}
         speechControl=speechActions==null?null:new SpeechControl(context,speechActions);
@@ -105,6 +118,17 @@ public final class SettingsView extends ScrollView {
     public boolean renderSpeech(SpeechControl.Model m){
         if(Looper.myLooper()!=Looper.getMainLooper())throw new IllegalStateException("render on main thread");
         if(m==null)throw new IllegalArgumentException("speech model required");if(speechControl==null)return false;speechControl.render(m);return true;
+    }
+    public void setOnReceiptTemplateRequested(Runnable callback){
+        if(Looper.myLooper()!=Looper.getMainLooper())throw new IllegalStateException("template entry on main thread");
+        onReceiptTemplateRequested=callback;receiptTemplateEntry.setEnabled(callback!=null);receiptTemplateEntry.setVisibility(callback==null?android.view.View.GONE:android.view.View.VISIBLE);
+    }
+    public void setOnPassportCheckRequested(Runnable callback){
+        if(Looper.myLooper()!=Looper.getMainLooper())throw new IllegalStateException("passport entry on main thread");onPassportCheckRequested=callback;passportEntry.setEnabled(callback!=null);passportEntry.setVisibility(callback==null?android.view.View.GONE:android.view.View.VISIBLE);
+    }
+    public void setOnDeviceConfigRequested(Runnable callback){
+        if(Looper.myLooper()!=Looper.getMainLooper())throw new IllegalStateException("config entry on main thread");
+        onDeviceConfigRequested=callback;deviceConfigEntry.setEnabled(callback!=null);deviceConfigEntry.setVisibility(callback==null?android.view.View.GONE:android.view.View.VISIBLE);
     }
     private String value(String s,String fallback){return s==null||s.trim().isEmpty()?fallback:s;}
     private TextView field(LinearLayout parent,String label,String value){LinearLayout r=row();r.setMinimumHeight(dp(48));r.addView(text(label,16,INK,false),new LinearLayout.LayoutParams(0,LayoutParams.WRAP_CONTENT,1));TextView v=text(value,14,MUTED,false);v.setGravity(Gravity.END);r.addView(v,new LinearLayout.LayoutParams(0,LayoutParams.WRAP_CONTENT,1));add(parent,r,6);return v;}

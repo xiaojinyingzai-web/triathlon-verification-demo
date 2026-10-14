@@ -1,0 +1,42 @@
+package com.triathlon.prep;
+import android.content.Context;
+import com.triathlon.prep.core.Verification;import com.triathlon.prep.core.nextday.FaceLibrary;
+import com.triathlon.prep.nextday.host.*;import com.triathlon.prep.nextday.storage.FaceLibraryKeyStore;import com.triathlon.prep.nextday.baidu.BaiduRuntimePreparation;
+import java.io.*;import java.nio.channels.*;import java.nio.charset.*;import java.security.*;import java.util.*;import org.json.*;
+/** Existing privileged private-inbox maintenance. Target metadata is not official licence/device proof. */
+public final class ProfileMaintenanceController {
+ private ProfileMaintenanceController(){}
+ private interface Work<T>{T run()throws Exception;}
+ private static File directory(Context app)throws IOException{File path=new File(app.getNoBackupFilesDir().getCanonicalFile(),"face-profile-maintenance");if(!path.getCanonicalFile().equals(path.getAbsoluteFile())||(!path.isDirectory()&&!path.mkdirs()))throw new IOException("Maintenance directory unavailable");return path;}
+ private static synchronized <T>T exclusive(Context app,Work<T> work)throws Exception{File path=new File(directory(app),"command.lock");if(!path.getCanonicalFile().equals(path.getAbsoluteFile()))throw new IOException("Maintenance lock invalid");try(RandomAccessFile file=new RandomAccessFile(path,"rw");FileChannel channel=file.getChannel();FileLock lock=channel.tryLock()){if(lock==null)throw new IOException("Maintenance busy");return work.run();}}
+ private static AuthenticatedProfileInstaller codec(Context app,String name)throws IOException{return new AuthenticatedProfileInstaller(new AtomicProfilePacketStore(new File(directory(app),name+".dat")),FaceLibraryKeyStore.loadOrCreate(app,Verification.Mode.LIVE),app.getPackageName()+".maintenance."+name,Verification.Mode.LIVE);}
+ private static final AuthenticatedProfileInstaller.Guard LOCAL=new AuthenticatedProfileInstaller.Guard(){public boolean current(){return true;}public void commit(AuthenticatedProfileInstaller.Write write)throws IOException{write.run();}};
+ private static String hex(byte[] bytes){StringBuilder out=new StringBuilder();for(byte b:bytes)out.append(String.format(Locale.ROOT,"%02x",b&255));return out.toString();}
+ private static String installation(Context app,boolean create)throws IOException{
+  AuthenticatedProfileInstaller store=codec(app,"installation");byte[] bytes=store.readAuthenticated();
+  if(bytes==null){if(!create)throw new IOException("Local installation not enrolled");bytes=new byte[32];new SecureRandom().nextBytes(bytes);store.install(bytes,b->{if(b.length!=32)throw new IOException("Installation invalid");},LOCAL);}
+  try{if(bytes.length!=32)throw new IOException("Installation invalid");return hex(bytes);}finally{Arrays.fill(bytes,(byte)0);}
+ }
+ public static String describe(Context app)throws Exception{return exclusive(app,()->new JSONObject().put("schema",1).put("appPackage",app.getPackageName()).put("installationId",installation(app,true)).put("modelFingerprint",NextDayFactory.fingerprint(app)).put("sdkIdentity",BaiduRuntimePreparation.SDK).put("officialDeviceEvidence","NOT_COLLECTED").put("licenceEvidence","NOT_COLLECTED").toString());}
+ private static byte[] consume(Context app,String name,int limit)throws IOException{
+  File file=new File(directory(app),name+".json");if(!file.getCanonicalFile().equals(file.getAbsoluteFile())||!file.isFile()||file.length()<1||file.length()>limit)throw new IOException("Maintenance inbox missing or invalid");
+  try(InputStream input=new FileInputStream(file)){if(!file.delete())throw new IOException("One-use inbox cannot be removed");ByteArrayOutputStream bytes=new ByteArrayOutputStream();byte[] block=new byte[4096];try{int n;while((n=input.read(block))!=-1){if(n==0){int b=input.read();if(b<0)break;block[0]=(byte)b;n=1;}if(bytes.size()>limit-n)throw new IOException("Inbox capacity exceeded");bytes.write(block,0,n);}return bytes.toByteArray();}finally{Arrays.fill(block,(byte)0);}}
+ }
+ private static JSONObject object(byte[] bytes)throws Exception{return new JSONObject(StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT).decode(java.nio.ByteBuffer.wrap(bytes)).toString());}
+ private static String string(JSONObject object,String key)throws JSONException{Object value=object.get(key);if(!(value instanceof String))throw new JSONException("String required");return (String)value;}
+ public static void registerTarget(Context app)throws Exception{exclusive(app,()->{byte[] input=consume(app,"target",4096);try{
+  JSONObject o=object(input);Set<String> keys=new HashSet<>();Iterator<String> it=o.keys();while(it.hasNext())keys.add(it.next());if(!keys.equals(new HashSet<>(Arrays.asList("schema","installationId","deviceBindingHash","profileSHA256","configurationRevision")))||!Integer.valueOf(1).equals(o.get("schema")))throw new IOException("Target schema invalid");Object raw=o.get("configurationRevision");if(!(raw instanceof Integer||raw instanceof Long))throw new IOException("Target revision invalid");
+  ProfileMaintenanceTarget target=new ProfileMaintenanceTarget(string(o,"installationId"),app.getPackageName(),NextDayFactory.fingerprint(app),BaiduRuntimePreparation.SDK,string(o,"deviceBindingHash"),string(o,"profileSHA256"),((Number)raw).longValue());target.requireLocal(installation(app,false),app.getPackageName(),NextDayFactory.fingerprint(app),BaiduRuntimePreparation.SDK);
+  PrivatePreparationMaintenance.invalidate(app);byte[] encoded=target.encode();try{codec(app,"target").install(encoded,b->ProfileMaintenanceTarget.decode(b),LOCAL);}finally{Arrays.fill(encoded,(byte)0);}return null;
+ }finally{Arrays.fill(input,(byte)0);}});}
+ private static ProfileMaintenanceTarget load(Context app)throws IOException{byte[] bytes=codec(app,"target").readAuthenticated();try{ProfileMaintenanceTarget target=ProfileMaintenanceTarget.decode(bytes);target.requireLocal(installation(app,false),app.getPackageName(),NextDayFactory.fingerprint(app),BaiduRuntimePreparation.SDK);return target;}finally{if(bytes!=null)Arrays.fill(bytes,(byte)0);}}
+ public static void install(Context app)throws Exception{exclusive(app,()->{
+  ProfileMaintenanceTarget target=load(app);final byte[] encoded=target.encode();byte[] profile=null;
+  try{profile=consume(app,"profile",AuthenticatedProfileInstaller.MAX_PLAIN);FaceLibrary.Scope scope=new FaceLibrary.Scope(Verification.Mode.LIVE,"00000000-0000-0000-0000-000000000000",target.modelFingerprint,"LIVE_PHOTO",512);BaiduRuntimePreparation.Binding binding=new BaiduRuntimePreparation.Binding(scope,target.appPackage,target.deviceBindingHash,target.sdkIdentity,target.profileSHA256,target.revision);
+   PrivatePreparationMaintenance.install(app,new ByteArrayInputStream(profile),new PrivatePreparationMaintenance.Target(){public BaiduRuntimePreparation.Binding expected(){return binding;}public boolean current(){try{return Arrays.equals(encoded,load(app).encode());}catch(IOException e){return false;}}public void invalidateRuntime()throws IOException{PrivatePreparationMaintenance.invalidate(app);}public void commit(AuthenticatedProfileInstaller.Write write)throws IOException{if(!current())throw new IOException("Maintenance target revoked");write.run();}});return null;
+  }finally{Arrays.fill(encoded,(byte)0);if(profile!=null)Arrays.fill(profile,(byte)0);}
+ });}
+ public static String verify(Context app)throws Exception{return exclusive(app,()->{
+  ProfileMaintenanceTarget target=load(app);File file=new File(app.getNoBackupFilesDir().getCanonicalFile(),"nextday-runtime/LIVE/preparation.dat");AuthenticatedProfileInstaller reader=new AuthenticatedProfileInstaller(new AtomicProfilePacketStore(file),FaceLibraryKeyStore.loadOrCreate(app,Verification.Mode.LIVE),app.getPackageName(),Verification.Mode.LIVE);byte[] bytes=reader.readAuthenticated();try{if(bytes==null||!target.profileSHA256.equals(hex(MessageDigest.getInstance("SHA-256").digest(bytes))))throw new IOException("Installed profile target mismatch");JSONObject o=object(bytes);if(!target.deviceBindingHash.equals(string(o,"deviceBindingHash"))||!target.appPackage.equals(string(o,"appPackage"))||!target.sdkIdentity.equals(string(o,"sdkIdentity"))||target.revision!=o.getLong("configurationRevision"))throw new IOException("Installed profile binding mismatch");return "AUTHENTICATED_PROFILE_ONLY;OFFICIAL_DEVICE_LICENCE_CALIBRATION_UNVERIFIED";}finally{if(bytes!=null)Arrays.fill(bytes,(byte)0);}
+ });}
+}

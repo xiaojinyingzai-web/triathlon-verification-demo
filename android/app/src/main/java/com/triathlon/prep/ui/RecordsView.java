@@ -64,6 +64,11 @@ public final class RecordsView extends ScrollView {
     private final TextView mode, count, dataNotice;
     private final Button[] filters=new Button[4];
     private final Actions actions;
+    private final Button previousPage,nextPage;
+    private java.util.function.IntConsumer onPageRequested;
+    private Model currentModel;
+    private int page,pageCount;
+    private boolean pagePending;
 
     public RecordsView(Context context,Actions actions) {
         super(context);if(actions==null)throw new IllegalArgumentException("actions required");this.actions=actions;
@@ -75,9 +80,12 @@ public final class RecordsView extends ScrollView {
         mode=text("",13,0xff825409,true);mode.setPadding(dp(9),dp(7),dp(9),dp(7));mode.setBackground(background(0xfffff0d6,0xfffff0d6,8));header.addView(mode);add(panel,header,14);
         dataNotice=text("",14,MUTED,false);add(panel,dataNotice,16);
         LinearLayout filterBar=row();String[] labels={"全部","通过","不通过","无法核验"};Filter[] values=Filter.values();
-        for(int i=0;i<4;i++){final Filter filter=values[i];filters[i]=button(labels[i],MUTED);filters[i].setTextSize(14);filters[i].setMinWidth(0);filters[i].setPadding(dp(3),0,dp(3),0);filters[i].setOnClickListener(v->this.actions.onFilterChanged(filter));LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,dp(50),1);if(i>0)p.leftMargin=dp(6);filterBar.addView(filters[i],p);}add(panel,filterBar,14);
+        for(int i=0;i<4;i++){final Filter filter=values[i];filters[i]=button(labels[i],MUTED);filters[i].setTextSize(14);filters[i].setMinWidth(0);filters[i].setPadding(dp(3),0,dp(3),0);filters[i].setOnClickListener(v->{if(currentModel==null||currentModel.loading||pagePending)return;clearDetail();pagePending=true;refreshPages();this.actions.onFilterChanged(filter);});LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,dp(50),1);if(i>0)p.leftMargin=dp(6);filterBar.addView(filters[i],p);}add(panel,filterBar,14);
         LinearLayout listHeading=row();listHeading.addView(text("最近记录",18,INK,true),new LinearLayout.LayoutParams(0,LayoutParams.WRAP_CONTENT,1));count=text("",14,MUTED,false);listHeading.addView(count);add(panel,listHeading,20);
         records=column();add(panel,records,10);
+        LinearLayout paging=row();previousPage=button("上一页",BLUE);nextPage=button("下一页",BLUE);
+        paging.addView(previousPage,new LinearLayout.LayoutParams(0,LayoutParams.WRAP_CONTENT,1));LinearLayout.LayoutParams pp=new LinearLayout.LayoutParams(0,LayoutParams.WRAP_CONTENT,1);pp.leftMargin=dp(12);paging.addView(nextPage,pp);add(panel,paging,12);
+        previousPage.setOnClickListener(v->requestPage(page-1));nextPage.setOnClickListener(v->requestPage(page+1));refreshPages();
         TextView note=text("日志仅保存号码尾号；姓名、证件照与现场照未保存，不提供历史照片查询。",14,0xff4b6278,false);note.setPadding(dp(14),dp(14),dp(14),dp(14));note.setBackground(background(0xffeef5fc,0xffd6e1ec,10));add(panel,note,16);
         TextView foot=text("核验记录展示 · 设备与算法实测待完成\n证件尾号不能作为跨会话唯一身份索引",12,MUTED,false);foot.setGravity(Gravity.CENTER);add(panel,foot,18);
     }
@@ -86,6 +94,7 @@ public final class RecordsView extends ScrollView {
     public void render(Model m) {
         if(Looper.myLooper()!=Looper.getMainLooper())throw new IllegalStateException("render on main thread");
         if(m==null)throw new IllegalArgumentException("model required");
+        currentModel=m;pagePending=false;refreshPages();
         mode.setText(m.simulation?"虚构测试":"正式模式");
         dataNotice.setText(value(m.dataNotice));count.setText(m.loading?"读取中":m.rows.size()+" 条");
         for(int i=0;i<filters.length;i++){boolean selected=Filter.values()[i]==m.filter;filters[i].setSelected(selected);filters[i].setTextColor(selected?BLUE:MUTED);filters[i].setBackground(background(selected?0xffe3eef9:Color.WHITE,selected?BLUE:LINE,9));filters[i].setContentDescription(filters[i].getText()+(selected?"，已选择":""));filters[i].setEnabled(!m.loading);}
@@ -95,7 +104,7 @@ public final class RecordsView extends ScrollView {
         if(m.rows.isEmpty()){empty("暂无核验记录",m.filter==Filter.ALL?"完成核验并成功保存后，才会有可查询记录。":"此筛选条件下没有记录，可切换到全部查看。");return;}
         for(Row r:m.rows){
             boolean open=r.sessionId.equals(m.selectedSessionId);LinearLayout card=column();card.setPadding(dp(14),dp(14),dp(14),dp(14));card.setBackground(background(Color.WHITE,LINE,12));
-            LinearLayout summary=column();summary.setMinimumHeight(dp(76));summary.setFocusable(true);summary.setClickable(true);summary.setContentDescription("记录 "+r.sessionId+"，"+(open?"收起详情":"查看详情"));summary.setOnClickListener(v->{if(open)this.actions.onCloseDetail();else this.actions.onRecordSelected(r.sessionId);});
+            LinearLayout summary=column();summary.setMinimumHeight(dp(76));summary.setFocusable(true);summary.setClickable(true);summary.setContentDescription("记录 "+r.sessionId+"，"+(open?"收起详情":"查看详情"));summary.setOnClickListener(v->{if(pagePending||currentModel!=m||currentModel.loading)return;if(open)this.actions.onCloseDetail();else this.actions.onRecordSelected(r.sessionId);});
             LinearLayout top=row();top.addView(text(value(r.time),17,INK,true),new LinearLayout.LayoutParams(0,LayoutParams.WRAP_CONTENT,1));TextView badge=text(resultLabel(r),13,resultColor(r.result),true);badge.setPadding(dp(6),dp(4),dp(6),dp(4));badge.setBackground(background(resultBackground(r.result),resultBackground(r.result),6));top.addView(badge);summary.addView(top);
             add(summary,text(r.sessionId,13,MUTED,false),7);add(summary,text("证件尾号 "+value(r.maskedNumber),14,MUTED,false),4);
             if(open||m.selectedSessionId==null){add(summary,text(value(r.reason),15,MUTED,false),7);add(summary,text(open?"收起详情 ↑":"查看详情 ↓",13,BLUE,false),4);}card.addView(summary);
@@ -108,6 +117,22 @@ public final class RecordsView extends ScrollView {
             add(records,card,10);
         }
     }
+    public void setOnPageRequested(java.util.function.IntConsumer callback){
+        main();onPageRequested=callback;refreshPages();
+    }
+    public void renderPage(int page,int pageCount,int totalMatched){
+        main();if(page<0||pageCount<0||totalMatched<0||pageCount==0&&page!=0||pageCount>0&&page>=pageCount)throw new IllegalArgumentException("Invalid record page");
+        if(this.page!=page&&currentModel!=null&&currentModel.selectedSessionId!=null)clearDetail();
+        this.page=page;this.pageCount=pageCount;pagePending=false;
+        if(currentModel!=null&&!currentModel.loading&&(currentModel.loadError==null||currentModel.loadError.trim().isEmpty()))count.setText(totalMatched+" 条 · "+(pageCount==0?0:page+1)+" / "+pageCount+" 页");refreshPages();
+    }
+    private void requestPage(int target){
+        if(onPageRequested==null||currentModel==null||currentModel.loading||pagePending||target<0||target>=pageCount)return;
+        clearDetail();pagePending=true;refreshPages();onPageRequested.accept(target);
+    }
+    private void clearDetail(){if(currentModel!=null)render(new Model(currentModel.simulation,currentModel.loading,currentModel.filter,currentModel.rows,null,currentModel.dataNotice,currentModel.loadError));}
+    private void refreshPages(){boolean enabled=onPageRequested!=null&&currentModel!=null&&!currentModel.loading&&!pagePending&&(currentModel.loadError==null||currentModel.loadError.trim().isEmpty());previousPage.setEnabled(enabled&&page>0);nextPage.setEnabled(enabled&&page+1<pageCount);for(Button filter:filters)if(filter!=null)filter.setEnabled(currentModel!=null&&!currentModel.loading&&!pagePending);previousPage.setVisibility(onPageRequested==null?View.GONE:View.VISIBLE);nextPage.setVisibility(onPageRequested==null?View.GONE:View.VISIBLE);}
+    private static void main(){if(Looper.myLooper()!=Looper.getMainLooper())throw new IllegalStateException("UI main thread required");}
     private void empty(String heading,String description){LinearLayout card=column();card.setPadding(dp(24),dp(45),dp(24),dp(45));card.setGravity(Gravity.CENTER);card.setBackground(background(Color.WHITE,LINE,12));TextView h=text(heading,21,INK,true);h.setGravity(Gravity.CENTER);card.addView(h);TextView d=text(description,16,MUTED,false);d.setGravity(Gravity.CENTER);add(card,d,14);Button back=button("返回核验主界面",BLUE);back.setOnClickListener(v->actions.onBack());add(card,back,22);records.addView(card);}
     private void detailPair(LinearLayout parent,String label1,String value1,String label2,String value2){LinearLayout r=row();r.setGravity(Gravity.TOP);r.addView(detail(label1,value1),new LinearLayout.LayoutParams(0,LayoutParams.WRAP_CONTENT,1));LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,LayoutParams.WRAP_CONTENT,1);p.leftMargin=dp(16);r.addView(detail(label2,value2),p);add(parent,r,12);}
     private LinearLayout detail(String label,String value){LinearLayout l=column();l.addView(text(label,12,MUTED,false));add(l,text(value(value),15,INK,false),4);return l;}

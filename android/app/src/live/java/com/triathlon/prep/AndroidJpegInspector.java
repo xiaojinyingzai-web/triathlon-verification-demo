@@ -30,7 +30,7 @@ public final class AndroidJpegInspector implements StandardCameraCapture.Inspect
      &&Float.isFinite(face.eyesDistance())&&face.eyesDistance()>0;}
    try(ErasingOutput out=new ErasingOutput()){
     if(!upright.compress(Bitmap.CompressFormat.PNG,100,out)||out.size()<8||out.size()>8*1024*1024)throw invalid();
-    byte[] png=out.toByteArray();try{return new StandardCameraCapture.Image(png,count,quality);}finally{java.util.Arrays.fill(png,(byte)0);}
+    byte[] png=out.toByteArray();try{return new StandardCameraCapture.Image(png,count,quality,upright.getWidth(),upright.getHeight());}finally{java.util.Arrays.fill(png,(byte)0);}
    }
   }finally{
    if(detectorImage!=null)detectorImage.recycle();

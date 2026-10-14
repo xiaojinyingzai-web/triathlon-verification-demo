@@ -20,6 +20,17 @@ import java.util.List;
 public final class RosterImportView extends ScrollView {
     public enum State { IDLE, READING, REVIEW, INVALID, SAVING, SAVED, ERROR }
     public enum CurrentStatus { NONE, VALID, CORRUPT }
+    public enum ExportState { IDLE, PREPARING, CHOOSING, WRITING, SUCCEEDED, CANCELLED, FAILED }
+    public static final class ExportModel {
+        public final ExportState state;
+        public final boolean enabled;
+        public final String notice;
+        public ExportModel(ExportState state,boolean enabled,String notice){
+            if(state==null||notice==null)throw new IllegalArgumentException("export state/notice required");
+            if(exportBusy(state)&&enabled)throw new IllegalArgumentException("busy export cannot request again");
+            this.state=state;this.enabled=enabled;this.notice=notice;
+        }
+    }
     public enum Field { FILE, EVENT, GROUP, BIB, NAME, ID_NUMBER, TEAM, ROW }
     public enum ErrorCode {
         UNSUPPORTED_FILE, UNREADABLE_FILE, MISSING_COLUMN, REQUIRED, INVALID_ID_LENGTH,
@@ -32,6 +43,7 @@ public final class RosterImportView extends ScrollView {
         void onDiscardPreview(String previewId);
         void onErrorPageChanged(String previewId, int page);
         void onBack();
+        default void onExportRequested() {}
     }
     /** Display-only summary; labels must be safe display text, never identifiers or raw cells. */
     public static final class BatchSummary {
@@ -103,11 +115,13 @@ public final class RosterImportView extends ScrollView {
 
     private static final int INK=0xff162638,MUTED=0xff637487,BLUE=0xff1769b7,LINE=0xffdce4ec;
     private final Actions actions;
-    private final TextView mode, currentText, candidateText, status, pageText, foot;
+    private final TextView mode, currentText, candidateText, status, pageText, foot,exportStatus;
     private final EditText event, group;
     private final LinearLayout candidateCard, errorCard, errorRows;
-    private final Button back, choose, confirm, discard, previous, next;
+    private final Button back, choose, confirm, discard, previous, next,export;
     private Model model;
+    private ExportModel exportModel=new ExportModel(ExportState.IDLE,false,"本机 / 当前名单批次；请先读取有效名单。");
+    private boolean exportPending;
 
     public RosterImportView(Context context, Actions actions) {
         super(context);if(actions==null)throw new IllegalArgumentException("actions required");this.actions=actions;
@@ -116,14 +130,17 @@ public final class RosterImportView extends ScrollView {
         addView(panel,new ScrollView.LayoutParams(LayoutParams.MATCH_PARENT,LayoutParams.WRAP_CONTENT));
         back=button("← 返回核验",false);panel.addView(back);
         LinearLayout header=row();LinearLayout heading=column();heading.addView(text("赛事名单",25,INK,true));
-        add(heading,text("导入本场名单，用于身份证号精确匹配",14,MUTED,false),4);
+        add(heading,text("导入本场名单，用于身份证刷卡匹配或护照人工查找",14,MUTED,false),4);
         header.addView(heading,new LinearLayout.LayoutParams(0,LayoutParams.WRAP_CONTENT,1));
         mode=text("待初始化",13,0xff825409,true);mode.setPadding(dp(9),dp(7),dp(9),dp(7));
         mode.setBackground(background(0xfffff0d6,0xfffff0d6,8));header.addView(mode);add(panel,header,14);
         LinearLayout active=card();active.addView(text("当前有效名单",20,INK,true));
-        currentText=text("尚未读取名单",16,MUTED,false);add(active,currentText,10);add(panel,active,18);
+        currentText=text("尚未读取名单",16,MUTED,false);add(active,currentText,10);
+        export=button("导出本机核验状态（Excel）",false);add(active,export,12);
+        add(active,text("范围：本机 / 当前名单批次",14,MUTED,false),8);
+        exportStatus=text("",14,MUTED,false);add(active,exportStatus,6);add(panel,active,18);
         LinearLayout source=card();source.addView(text("选择 Excel 名单",20,INK,true));
-        add(source,text("必填：比赛号码、姓名、证件号码、参赛组别；所属团体可选。证件号码请保存为文本，避免精度丢失。",15,MUTED,false),10);
+        add(source,text("必填：比赛号码、姓名、身份证号或护照号码、参赛组别；所属团体可选。证件号码和比赛号码请保存为文本，避免精度或前导零丢失；护照列或证件类型须明确。",15,MUTED,false),10);
         add(source,text("赛事名称",15,INK,true),14);event=input("明确填写本场赛事名称");add(source,event,6);
         add(source,text("默认参赛组别（表格无组别列时填写）",15,INK,true),12);
         group=input("有组别列时使用表格内容");add(source,group,6);
@@ -141,13 +158,16 @@ public final class RosterImportView extends ScrollView {
         discard=button("取消本次导入",false);add(panel,discard,10);
         foot=text("名单导入不代表身份核验通过",12,MUTED,false);foot.setGravity(Gravity.CENTER);add(panel,foot,16);
         back.setOnClickListener(v->{Model m=model;if(m!=null&&m.backEnabled)this.actions.onBack();});
-        choose.setOnClickListener(v->{Model m=model;if(m!=null&&m.chooseEnabled)this.actions.onChooseFile(event.getText().toString(),group.getText().toString());});
-        confirm.setOnClickListener(v->{Model m=model;if(m!=null&&m.confirmEnabled)this.actions.onConfirmImport(m.previewId);});
-        discard.setOnClickListener(v->{Model m=model;if(m!=null&&m.discardEnabled)this.actions.onDiscardPreview(m.previewId);});
+        choose.setOnClickListener(v->{Model m=model;if(m!=null&&m.chooseEnabled&&!exportBlocked())this.actions.onChooseFile(event.getText().toString(),group.getText().toString());});
+        confirm.setOnClickListener(v->{Model m=model;if(m!=null&&m.confirmEnabled&&!exportBlocked())this.actions.onConfirmImport(m.previewId);});
+        discard.setOnClickListener(v->{Model m=model;if(m!=null&&m.discardEnabled&&!exportBlocked())this.actions.onDiscardPreview(m.previewId);});
+        export.setOnClickListener(v->{if(!canExport())return;exportPending=true;refreshActions();
+            exportStatus.setText("导出请求正在提交；等待确认\n本机 / 当前名单批次");exportStatus.setTextColor(MUTED);this.actions.onExportRequested();});
         previous.setOnClickListener(v->changePage(-1));next.setOnClickListener(v->changePage(1));
         enable(back,false);enable(choose,false);enable(confirm,false);enable(discard,false);
         enable(previous,false);enable(next,false);event.setEnabled(false);group.setEnabled(false);
         candidateCard.setVisibility(View.GONE);errorCard.setVisibility(View.GONE);
+        renderExport(exportModel);
     }
 
     /** Host must supply sanitized display labels/messages and discard stale async results before render. */
@@ -162,8 +182,7 @@ public final class RosterImportView extends ScrollView {
         mode.setText(m.simulation?"虚构测试":"正式模式");
         currentText.setText(m.currentStatus==CurrentStatus.VALID?summary(m.currentBatch,false):
                 m.currentStatus==CurrentStatus.CORRUPT?"名单读取异常，当前不能进行赛事核验。":"尚未导入名单，当前不能进行赛事核验。");
-        event.setEnabled(m.chooseEnabled&&m.previewId==null);group.setEnabled(m.chooseEnabled&&m.previewId==null);
-        enable(choose,m.chooseEnabled);enable(confirm,m.confirmEnabled);enable(discard,m.discardEnabled);enable(back,m.backEnabled);
+        refreshActions();enable(back,m.backEnabled);
         status.setText(stateLabel(m.state)+(empty(m.statusMessage)?"":"\n"+m.statusMessage));
         status.setTextColor(m.state==State.INVALID||m.state==State.ERROR?0xffa13730:m.state==State.SAVED?0xff236c47:BLUE);
         candidateCard.setVisibility(m.candidate==null?View.GONE:View.VISIBLE);
@@ -174,11 +193,35 @@ public final class RosterImportView extends ScrollView {
             TextView line=text(location+" · "+fieldLabel(e.field)+"\n"+errorLabel(e.code),15,INK,false);
             line.setPadding(0,dp(10),0,dp(10));errorRows.addView(line);}
         pageText.setText(m.errorCount+" 项问题 · "+(m.errorPageCount==0?0:m.errorPage+1)+" / "+m.errorPageCount);
-        boolean pageable=m.previewId!=null&&m.state!=State.READING&&m.state!=State.SAVING;
+        boolean pageable=m.previewId!=null&&m.state!=State.READING&&m.state!=State.SAVING&&!exportBlocked();
         enable(previous,pageable&&m.errorPage>0);enable(next,pageable&&m.errorPage+1<m.errorPageCount);
-        foot.setText(m.simulation?"虚构名单测试 · 仅验证导入与匹配流程\n名单匹配与本次人证一致都满足，才可产生赛事通过":"名单只用于本场参赛身份匹配\n名单匹配与本次人证一致都满足，才可产生赛事通过");
+        foot.setText((m.simulation?"虚构名单测试 · 非有效身份核验":"名单只用于本场参赛身份匹配")+"\n自动刷卡须名单匹配且本次人证一致；护照由工作人员另行人工核对。");
     }
-    private void changePage(int delta){Model m=model;if(m==null||m.previewId==null||m.state==State.READING||m.state==State.SAVING)return;
+    /** Host confirms actual export progress; choosing a destination is not success. */
+    public void renderExport(ExportModel m){
+        if(Looper.myLooper()!=Looper.getMainLooper())throw new IllegalStateException("export render on main thread");
+        if(m==null)throw new IllegalArgumentException("export model required");exportModel=m;exportPending=false;
+        String label;switch(m.state){case PREPARING:label="正在准备名单核验状态…";break;
+            case CHOOSING:label="请选择导出文件保存位置；尚未导出完成";break;
+            case WRITING:label="正在写入导出文件…";break;
+            case SUCCEEDED:label="导出已完成";break;
+            case CANCELLED:label="导出已取消，当前名单保持不变";break;
+            case FAILED:label="导出未完成，请重试";break;
+            default:label="等待导出本机当前批次核验状态";break;}
+        exportStatus.setText(label+(empty(m.notice)?"":"\n"+m.notice));
+        exportStatus.setTextColor(m.state==ExportState.FAILED?0xffa13730:m.state==ExportState.SUCCEEDED?0xff236c47:MUTED);
+        refreshActions();
+    }
+    private static boolean exportBusy(ExportState state){return state==ExportState.PREPARING||state==ExportState.CHOOSING||state==ExportState.WRITING;}
+    private boolean exportBlocked(){return exportPending||exportBusy(exportModel.state);}
+    private boolean canExport(){return model!=null&&model.currentStatus==CurrentStatus.VALID&&model.state!=State.READING&&model.state!=State.SAVING&&exportModel.enabled&&!exportBlocked();}
+    private void refreshActions(){Model m=model;boolean managing=m!=null&&!exportBlocked();
+        enable(export,canExport());enable(choose,managing&&m.chooseEnabled);enable(confirm,managing&&m.confirmEnabled);enable(discard,managing&&m.discardEnabled);
+        event.setEnabled(managing&&m.chooseEnabled&&m.previewId==null);group.setEnabled(managing&&m.chooseEnabled&&m.previewId==null);
+        boolean paging=managing&&m.previewId!=null&&m.state!=State.READING&&m.state!=State.SAVING;
+        enable(previous,paging&&m.errorPage>0);enable(next,paging&&m.errorPage+1<m.errorPageCount);
+    }
+    private void changePage(int delta){Model m=model;if(m==null||m.previewId==null||m.state==State.READING||m.state==State.SAVING||exportBlocked())return;
         int page=m.errorPage+delta;if(page>=0&&page<m.errorPageCount)actions.onErrorPageChanged(m.previewId,page);}
     private String summary(BatchSummary b,boolean pending){return "赛事："+value(b.eventName,"—")+"\n批次："+value(b.batchLabel,"—")+
             (pending?"\n文件："+value(b.fileLabel,"—"):"")+"\n"+(pending?"总行数："+b.totalRows+"   有效："+b.validRows+"   错误行："+b.errorRows:"人数："+b.validRows);}

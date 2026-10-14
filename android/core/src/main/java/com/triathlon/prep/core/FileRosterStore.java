@@ -18,14 +18,16 @@ public final class FileRosterStore implements Verification.RosterProvider {
   CRC32 crc=new CRC32();
   try(DataInputStream in=new DataInputStream(new CheckedInputStream(new FileInputStream(file),crc))){
    if(in.readInt()!=MAGIC)throw new IOException("Unknown roster format");
-   int version=in.readInt();if(version!=1&&version!=2)throw new IOException("Unknown roster format");
+   int version=in.readInt();if(version!=1&&version!=2&&version!=3&&version!=4)throw new IOException("Unknown roster format");
    String event=in.readUTF(),batch=in.readUTF();int count=in.readInt();
    if(count<1||count>RaceRoster.MAX_ROWS)throw new IOException("Invalid roster count");
    List<RaceRoster.Entry> rows=new ArrayList<>();
    for(int i=0;i<count;i++){
+    DocumentNumber.Type type=version>=3?DocumentNumber.Type.valueOf(in.readUTF()):DocumentNumber.Type.ID_CARD;
+    boolean sourceChecksumAllowed=version>=4&&in.readBoolean();
     String identity=in.readUTF(),bib=in.readUTF(),name=in.readUTF(),group=in.readUTF(),team=in.readUTF();
     RaceRoster.SwimTest swim=version==1?RaceRoster.SwimTest.UNKNOWN:RaceRoster.SwimTest.valueOf(in.readUTF());
-    rows.add(new RaceRoster.Entry(identity,bib,name,group,team,swim));
+    rows.add(sourceChecksumAllowed?RaceRoster.Entry.fromSourceText(type,identity,bib,name,group,team,swim):new RaceRoster.Entry(type,identity,bib,name,group,team,swim));
    }
    long actual=crc.getValue();if(in.readLong()!=actual||in.read()!=-1)throw new IOException("Corrupt roster snapshot");
    return new RaceRoster(event,batch,rows);
@@ -35,8 +37,8 @@ public final class FileRosterStore implements Verification.RosterProvider {
   if(roster==null)throw new IOException("Validated roster required");recover();
   CRC32 crc=new CRC32();
   try(FileOutputStream stream=new FileOutputStream(pending);DataOutputStream out=new DataOutputStream(new CheckedOutputStream(stream,crc))){
-   out.writeInt(MAGIC);out.writeInt(2);out.writeUTF(roster.eventName);out.writeUTF(roster.batchId);out.writeInt(roster.size());
-   for(RaceRoster.Entry e:roster.storedEntries()){out.writeUTF(e.identity());out.writeUTF(e.athlete.bib);out.writeUTF(e.athlete.name);out.writeUTF(e.athlete.group);out.writeUTF(e.athlete.team);out.writeUTF(e.athlete.swimTest.name());}
+   out.writeInt(MAGIC);out.writeInt(4);out.writeUTF(roster.eventName);out.writeUTF(roster.batchId);out.writeInt(roster.size());
+   for(RaceRoster.Entry e:roster.storedEntries()){out.writeUTF(e.documentType().name());out.writeBoolean(e.sourceChecksumAllowed());out.writeUTF(e.originalDocument());out.writeUTF(e.athlete.bib);out.writeUTF(e.athlete.name);out.writeUTF(e.athlete.group);out.writeUTF(e.athlete.team);out.writeUTF(e.athlete.swimTest.name());}
    out.writeLong(crc.getValue());out.flush();stream.getFD().sync();
   }
   if(file.exists()&&!file.renameTo(backup))throw new IOException("Cannot preserve current roster");

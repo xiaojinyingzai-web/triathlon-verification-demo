@@ -26,6 +26,9 @@ public final class VerificationDisplay implements AutoCloseable {
     private Runnable changed;
     private String boundPreview;
     private PreviewLease<Surface> target;
+    private int outstandingPreviewResources;
+    /** True only after borrowed preview leases have actually been returned and disposed. */
+    public boolean previewResourcesReleased(){synchronized(lock){return outstandingPreviewResources==0;}}
     private Consumer<PreviewLease<Surface>> waiting;
     private Consumer<Long> frames;
     private SurfaceTexture texture;
@@ -42,7 +45,8 @@ public final class VerificationDisplay implements AutoCloseable {
                 synchronized(lock){failed=waiting;waiting=null;}
                 if(failed!=null)main.post(()->failed.accept(null));return;
             }
-            PreviewLease<Surface> created=new PreviewLease<>(surface,()->{try{surface.release();}catch(RuntimeException ignored){}});
+            synchronized(lock){outstandingPreviewResources++;}
+            PreviewLease<Surface> created=new PreviewLease<>(surface,()->{try{surface.release();synchronized(lock){outstandingPreviewResources--;}}catch(RuntimeException ignored){/* Known unconfirmed release keeps the handoff blocked. */}});
             Consumer<PreviewLease<Surface>> notify;
             synchronized(lock){if(!currentLocked(sessionId)||generation!=previewGeneration){created.invalidate();return;}target=created;VerificationDisplay.this.texture=texture;previewWidth=w;previewHeight=h;notify=waiting;waiting=null;}
             if(notify!=null)main.post(()->notify.accept(created));

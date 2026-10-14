@@ -7,7 +7,8 @@ public final class RosterImportSession {
  private final FileRosterStore store;
  private ExcelRosterReader.Preview candidate;
  public RosterImportSession(FileRosterStore store){if(store==null)throw new IllegalArgumentException("Roster store required");this.store=store;}
- public ExcelRosterReader.Preview preview(InputStream source,String fileName,String event,String fallbackGroup){candidate=ExcelRosterReader.read(source,fileName,event,fallbackGroup);return candidate;}
+ public ExcelRosterReader.Preview preview(InputStream source,String fileName,String event,String fallbackGroup){return preview(source,fileName,event,fallbackGroup,ExcelRosterReader.WorksheetScope.ALL_WORKSHEETS);}
+ public ExcelRosterReader.Preview preview(InputStream source,String fileName,String event,String fallbackGroup,ExcelRosterReader.WorksheetScope scope){candidate=ExcelRosterReader.read(source,fileName,event,fallbackGroup,scope);return candidate;}
  public ExcelRosterReader.Preview candidate(){return candidate;}
  public void discard(String id){if(candidate!=null&&candidate.id.equals(id))candidate=null;}
  public RaceRoster confirm(String id,boolean replaceAllowed)throws IOException{

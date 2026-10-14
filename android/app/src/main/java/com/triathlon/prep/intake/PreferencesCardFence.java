@@ -15,14 +15,16 @@ public final class PreferencesCardFence implements CardAdmissionFence {
     public static final String PREFERENCES_NAME = "triathlon_card_admission_v1";
     private static final Object PROCESS_LOCK = new Object();
     private static final String SECRET = "local_hmac_secret";
-    private final SharedPreferences preferences;
-    public PreferencesCardFence(Context context) {
-        if (context == null) throw new IllegalArgumentException("Context required");
+    private final SharedPreferences preferences;private final java.util.function.Supplier<String> batch;
+    public PreferencesCardFence(Context context) {this(context,()->"");}
+    public PreferencesCardFence(Context context,java.util.function.Supplier<String> batch) {
+        if (context == null || batch == null) throw new IllegalArgumentException("Context/batch required");
         preferences = context.getApplicationContext().getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE);
+        this.batch=batch;
     }
     PreferencesCardFence(SharedPreferences preferences) {
         if (preferences == null) throw new IllegalArgumentException("Preferences required");
-        this.preferences = preferences;
+        this.preferences = preferences;this.batch=()->"";
     }
     @Override public Result admit(Verification.Mode mode, String number) {
         if (mode == null) return Result.FAILED;
@@ -41,7 +43,8 @@ public final class PreferencesCardFence implements CardAdmissionFence {
                 }
                 Mac mac = Mac.getInstance("HmacSHA256");
                 mac.init(new SecretKeySpec(secret, "HmacSHA256"));
-                String token = hex(mac.doFinal((mode.name() + ":" + normalized).getBytes(StandardCharsets.UTF_8)));
+                String scope=batch.get();
+                String token = hex(mac.doFinal((mode.name() + ":" + (scope.isEmpty()?"":scope+":") + normalized).getBytes(StandardCharsets.UTF_8)));
                 String key = "last_" + mode.name();
                 if (preferences.contains(key)) {
                     String last = preferences.getString(key, null);

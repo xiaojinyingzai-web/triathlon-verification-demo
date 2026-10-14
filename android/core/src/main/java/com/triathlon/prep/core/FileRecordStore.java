@@ -15,7 +15,7 @@ import java.util.zip.CheckedOutputStream;
 /** Private, versioned snapshot. No document numbers, names, image bytes or features are persisted. */
 public final class FileRecordStore implements Verification.RecordStore {
     private static final int MAGIC = 0x54505331;
-    private static final int LIMIT = 1000;
+    public static final int MAX_RECORDS = 1000;
     private final File file, backup, pending;
 
     // ponytail: one owner per app process and 1000 demo records; move to SQLite for concurrency/large history.
@@ -32,7 +32,7 @@ public final class FileRecordStore implements Verification.RecordStore {
         validate(record);
         List<Verification.Record> records = list();
         records.removeIf(item -> item.sessionId.equals(record.sessionId));
-        if (records.size() >= LIMIT) throw new IOException("Demo log limit reached; clear test records");
+        if (records.size() >= MAX_RECORDS) throw new IOException("Local record capacity reached; this result is not saved. Preserve records for administrator review.");
         records.add(record);
         commit(records);
     }
@@ -45,18 +45,21 @@ public final class FileRecordStore implements Verification.RecordStore {
         CRC32 checksum = new CRC32();
         try (DataInputStream input = new DataInputStream(new CheckedInputStream(new FileInputStream(file), checksum))) {
             if (input.readInt() != MAGIC) throw new IOException("Unknown log format");
-            int version=input.readInt();if(version!=2&&version!=3)throw new IOException("Unknown log format");
+            int version=input.readInt();if(version!=2&&version!=3&&version!=4)throw new IOException("Unknown log format");
             int count = input.readInt();
-            if (count < 0 || count > LIMIT) throw new IOException("Invalid log count");
+            if (count < 0 || count > MAX_RECORDS) throw new IOException("Invalid log count");
             for (int i = 0; i < count; i++) {
                 Verification.Record record = new Verification.Record(input.readUTF(), input.readLong(),
                         Verification.Mode.valueOf(input.readUTF()), input.readUTF(), input.readUTF(),
                         Verification.Verdict.valueOf(input.readUTF()), Verification.Error.valueOf(input.readUTF()),
                         Verification.Liveness.valueOf(input.readUTF()), readNumber(input), readNumber(input),
                         input.readBoolean() ? Verification.ScoreRule.valueOf(input.readUTF()) : null, input.readUTF());
-                if(version==3)record=new Verification.Record(record.sessionId,record.timestamp,record.mode,record.maskedNumber,
+                if(version>=3)record=new Verification.Record(record.sessionId,record.timestamp,record.mode,record.maskedNumber,
                         record.comparisonSource,record.verdict,record.error,record.liveness,record.score,record.threshold,record.rule,record.algorithmVersion,
                         input.readUTF(),Verification.Membership.valueOf(input.readUTF()));
+                if(version==4)record=new Verification.Record(record.sessionId,record.timestamp,record.mode,record.maskedNumber,
+                        record.comparisonSource,record.verdict,record.error,record.liveness,record.score,record.threshold,record.rule,record.algorithmVersion,
+                        record.rosterBatchId,record.membership,input.readUTF());
                 validate(record);
                 records.add(record);
             }
@@ -82,7 +85,7 @@ public final class FileRecordStore implements Verification.RecordStore {
         CRC32 checksum = new CRC32();
         try (FileOutputStream stream = new FileOutputStream(pending);
              DataOutputStream output = new DataOutputStream(new CheckedOutputStream(stream, checksum))) {
-            output.writeInt(MAGIC); output.writeInt(3); output.writeInt(records.size());
+            output.writeInt(MAGIC); output.writeInt(4); output.writeInt(records.size());
             for (Verification.Record record : records) {
                 output.writeUTF(record.sessionId); output.writeLong(record.timestamp);
                 output.writeUTF(record.mode.name()); output.writeUTF(record.maskedNumber);
@@ -93,6 +96,7 @@ public final class FileRecordStore implements Verification.RecordStore {
                 if (record.rule != null) output.writeUTF(record.rule.name());
                 output.writeUTF(record.algorithmVersion);
                 output.writeUTF(record.rosterBatchId);output.writeUTF(record.membership.name());
+                output.writeUTF(record.rosterBib);
             }
             output.writeLong(checksum.getValue());
             output.flush(); stream.getFD().sync();
@@ -105,7 +109,7 @@ public final class FileRecordStore implements Verification.RecordStore {
         if (backup.exists() && !backup.delete()) throw new IOException("Log backup cleanup failed");
     }
 
-    private static void validate(Verification.Record record) throws IOException {
+    static void validate(Verification.Record record) throws IOException {
         if (record == null || record.sessionId == null
                 || !record.sessionId.matches("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
                 || record.mode == null || record.verdict == null || record.error == null || record.liveness == null
@@ -116,6 +120,9 @@ public final class FileRecordStore implements Verification.RecordStore {
                 || record.membership==null || record.rosterBatchId==null
                 || !record.rosterBatchId.matches("(?:|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
                 || (record.membership==Verification.Membership.MATCHED&&record.rosterBatchId.isEmpty())
+                || record.rosterBib==null||record.rosterBib.length()>80||record.rosterBib.matches("(?s).*[\\p{Cntrl}].*")
+                || !record.rosterBib.equals(record.rosterBib.trim())
+                || (!record.rosterBib.isEmpty()&&(record.membership!=Verification.Membership.MATCHED||record.rosterBatchId.isEmpty()))
                 || (record.score != null && !Double.isFinite(record.score))
                 || (record.threshold != null && !Double.isFinite(record.threshold))) {
             throw new IOException("Unsafe or malformed record");

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Explicit debug maintenance entry; normal launcher and business startup are unchanged. -->
+        <activity android:name="com.triathlon.prep.DebugCameraPreviewActivity" android:exported="true" />
+        <activity android:name="com.triathlon.prep.DebugReaderOnlyActivity" android:exported="true" />
+    </application>
+    <instrumentation android:name="com.triathlon.prep.PrivateProvisioningInstrumentation"
+        android:targetPackage="${applicationId}" android:functionalTest="false" />
+</manifest>

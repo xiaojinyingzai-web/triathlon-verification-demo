@@ -40,6 +40,22 @@ public final class Verification {
         void compare(String sessionId, byte[] chipPhoto, byte[] livePhoto, Reply<Comparison> reply);
         void cancel(String sessionId);
     }
+    /** Borrowed current qualified scene only. Copy synchronously and return; never extract before SAVED.
+     * The callback is optional, contains no chip photo, and cannot determine this manufacturer's result. */
+    public interface QualifiedCaptureObserver {
+        void captured(Snapshot context,byte[] borrowedScene,SceneMetadata provenance,long observedAtElapsed);
+    }
+    /** Capture-source evidence, not a callback-time freshness assertion. The request elapsed time
+     * is a conservative age lower boundary; sensor nanos remain opaque unless its clock is proven. */
+    public static final class SceneMetadata {
+        public enum Encoding { PNG, SYNTHETIC }
+        public final String frameId;public final long requestStartedElapsed,sensorTimestampNanos;
+        public final int width,height,rotation;public final boolean mirror;public final Encoding encoding;
+        public SceneMetadata(String frameId,long requestStartedElapsed,long sensorTimestampNanos,int width,int height,int rotation,boolean mirror,Encoding encoding){
+            if(frameId==null||!frameId.matches("[A-Za-z0-9._:-]{1,128}")||requestStartedElapsed<0||sensorTimestampNanos<0||width<1||height<1||width>4096||height>4096||(long)width*height>4_000_000||rotation!=0||mirror||encoding==null)throw new IllegalArgumentException("Normalized scene-source provenance required");
+            this.frameId=frameId;this.requestStartedElapsed=requestStartedElapsed;this.sensorTimestampNanos=sensorTimestampNanos;this.width=width;this.height=height;this.rotation=rotation;this.mirror=mirror;this.encoding=encoding;
+        }
+    }
     /** Captures one attributed frame, validates quality/liveness and returns a 1:1 observation.
      * Copies chipPhoto synchronously before returning. onAnalyzing is invoked only after accepting
      * the current frame, before the terminal reply; callbacks must not hold adapter cleanup locks. */
@@ -53,6 +69,17 @@ public final class Verification {
         void save(Record record) throws IOException;
         List<Record> list() throws IOException;
         void clear() throws IOException;
+        /** SQLite overrides with the same atomic transaction as the audit commit. */
+        default CheckIn.State saveCheckIn(Record record) throws IOException {
+            synchronized(this){CheckIn.State state=CheckIn.classify(record,list(),false);save(record);return state;}
+        }
+    }
+    /** Host authority is independent of the flow monitor and any synchronous adapter work.
+     * commit must check the pinned lease atomically with the record transaction. */
+    public interface OperationGuard {
+        long pin();
+        boolean current(long lease);
+        CheckIn.State commit(long lease,RecordStore store,Record record) throws IOException;
     }
 
     public static final class Card implements AutoCloseable {
@@ -73,26 +100,41 @@ public final class Verification {
         private final byte[] photo;
         public final int faceCount;
         public final boolean qualityAccepted;
+        public final SceneMetadata provenance;
         public Capture(byte[] photo, int faceCount, boolean qualityAccepted) {
+            this(photo,faceCount,qualityAccepted,null);
+        }
+        public Capture(byte[] photo,int faceCount,boolean qualityAccepted,SceneMetadata provenance){
             this.photo = photo == null ? null : photo.clone();
             this.faceCount = faceCount;
             this.qualityAccepted = qualityAccepted;
+            this.provenance=provenance;
         }
         private void erase() { if (photo != null) Arrays.fill(photo, (byte) 0); }
         @Override public void close() { erase(); }
     }
     public static final class Comparison {
+        public final boolean scoresOnly;
+        public final Double liveGrade;
         public final Liveness liveness;
         public final Double score, threshold;
         public final ScoreRule rule;
         public final String algorithmVersion;
         public Comparison(Liveness liveness, Double score, Double threshold,
                           ScoreRule rule, String algorithmVersion) {
+            this(liveness,score,threshold,rule,algorithmVersion,false,null);
+        }
+        private Comparison(Liveness liveness, Double score, Double threshold,
+                          ScoreRule rule, String algorithmVersion,boolean scoresOnly,Double liveGrade) {
+            this.scoresOnly=scoresOnly;this.liveGrade=liveGrade;
             this.liveness = liveness;
             this.score = score;
             this.threshold = threshold;
             this.rule = rule;
             this.algorithmVersion = algorithmVersion;
+        }
+        public static Comparison scoresOnly(Double liveGrade,Double faceGrade,String algorithmVersion) {
+            return new Comparison(Liveness.UNAVAILABLE,faceGrade,null,null,algorithmVersion,true,liveGrade);
         }
     }
     public static final class Record {
@@ -109,6 +151,8 @@ public final class Verification {
         public final String algorithmVersion;
         public final String rosterBatchId;
         public final Membership membership;
+        /** Exact roster member key within rosterBatchId; empty on legacy/unmatched records. */
+        public final String rosterBib;
         /** null means a historical identity-only record, never event acceptance. */
         public final Verdict eventVerdict;
         public Record(String sessionId, long timestamp, Mode mode, String maskedNumber,
@@ -120,6 +164,12 @@ public final class Verification {
                       String comparisonSource, Verdict verdict, Error error, Liveness liveness,
                       Double score, Double threshold, ScoreRule rule, String algorithmVersion,
                       String rosterBatchId,Membership membership) {
+            this(sessionId,timestamp,mode,maskedNumber,comparisonSource,verdict,error,liveness,score,threshold,rule,algorithmVersion,rosterBatchId,membership,"");
+        }
+        public Record(String sessionId, long timestamp, Mode mode, String maskedNumber,
+                      String comparisonSource, Verdict verdict, Error error, Liveness liveness,
+                      Double score, Double threshold, ScoreRule rule, String algorithmVersion,
+                      String rosterBatchId,Membership membership,String rosterBib) {
             this.sessionId = sessionId;
             this.timestamp = timestamp;
             this.mode = mode;
@@ -133,29 +183,35 @@ public final class Verification {
             this.rule = rule;
             this.algorithmVersion = algorithmVersion;
             this.rosterBatchId=rosterBatchId;this.membership=membership;
+            this.rosterBib=rosterBib;
             this.eventVerdict=membership==Membership.LEGACY_NOT_EVALUATED?null:
                     verdict==Verdict.CANCELLED?Verdict.CANCELLED:membership==Membership.MATCHED?verdict:
                     membership==Membership.NOT_LISTED?Verdict.REJECTED:Verdict.UNAVAILABLE;
         }
     }
     public static final class Snapshot {
+        public final boolean scoresOnly;
+        public final Double liveGrade;
         public final String sessionId;
         public final Stage stage;
         public final Mode mode;
         public final Record result;
         public final SaveState saveState;
+        public final CheckIn.State checkIn;
         public final String name, maskedNumber;
         public final RaceRoster.Athlete athlete;
         public final Membership membership;
         public final String rosterBatchId;
         public final String eventName;
         private Snapshot(String id, Stage stage, Mode mode, Record result, SaveState saveState,
-                String name, String maskedNumber,RaceRoster.Athlete athlete,Membership membership,String rosterBatchId,String eventName) {
+                String name, String maskedNumber,RaceRoster.Athlete athlete,Membership membership,String rosterBatchId,String eventName,CheckIn.State checkIn,boolean scoresOnly,Double liveGrade) {
+            this.scoresOnly=scoresOnly;this.liveGrade=liveGrade;
             this.sessionId = id; this.stage = stage; this.mode = mode;
             this.result = result; this.saveState = saveState;
             this.name = name; this.maskedNumber = maskedNumber;
             this.athlete=athlete;this.membership=membership;this.rosterBatchId=rosterBatchId;
             this.eventName=eventName;
+            this.checkIn=checkIn;
         }
     }
 
@@ -177,8 +233,17 @@ public final class Verification {
     private Capture capture;
     private byte[] comparisonChip, comparisonLive;
     private Record result;
+    private boolean scoresOnly;
+    private Double liveGrade;
     private SaveState saveState = SaveState.NONE;
+    private CheckIn.State checkIn = CheckIn.State.NOT_SUCCESS;
     private boolean currentFrameObserved;
+    private QualifiedCaptureObserver qualifiedCaptureObserver;
+    private OperationGuard operationGuard;
+    private long operationLease;
+    public synchronized void setOperationGuard(OperationGuard guard){if(active())throw new IllegalStateException("Cannot replace active authority");operationGuard=guard;}
+    private boolean operationCurrent(){return operationGuard==null||operationGuard.current(operationLease);}
+    public synchronized void setQualifiedCaptureObserver(QualifiedCaptureObserver observer){qualifiedCaptureObserver=observer;}
 
     public Verification(Mode mode, DeviceAdapter device, AlgorithmAdapter algorithm,
                         RecordStore store, Clock clock, long stageTimeoutMillis) {
@@ -211,15 +276,18 @@ public final class Verification {
     public synchronized Snapshot snapshot() {
         return new Snapshot(sessionId, stage, mode, result, saveState,
                 card == null ? null : card.name,
-                card == null ? null : "**************" + card.number.substring(14),athlete,membership,pinnedRoster==null?"":pinnedRoster.batchId,pinnedRoster==null?"":pinnedRoster.eventName);
+                card == null ? null : "**************" + card.number.substring(14),athlete,membership,pinnedRoster==null?"":pinnedRoster.batchId,pinnedRoster==null?"":pinnedRoster.eventName,checkIn,scoresOnly,liveGrade);
     }
 
     /** Begin/retry always makes a new session, even when the same document is used. */
     public synchronized String begin() {
+        if(!operationCurrent()&&stage!=Stage.IDLE)discardRevoked();
         requireSaved();
         if (active()) finish(Verdict.CANCELLED, Error.CANCELLED, null);
         requireSaved();
         reset();
+        operationLease=operationGuard==null?0:operationGuard.pin();
+        if(!operationCurrent())return "";
         sessionId = UUID.randomUUID().toString();
         enter(Stage.READING);
         final String id = sessionId;
@@ -260,6 +328,7 @@ public final class Verification {
 
     /** Called by the host timer. Every callback also checks the deadline. */
     public synchronized void tick() {
+        if(!operationCurrent()&&stage!=Stage.IDLE){discardRevoked();return;}
         if (active() && clock.elapsedMillis() >= deadline) {
             finish(Verdict.UNAVAILABLE, Error.TIMEOUT, null);
         }
@@ -351,8 +420,14 @@ public final class Verification {
                 : value.faceCount != 1 || !value.qualityAccepted || !validPhoto(value.photo)
                 ? Error.BAD_CAPTURE : Error.NONE;
         if (invalid != Error.NONE) { finish(Verdict.UNAVAILABLE, invalid, null); return; }
-        capture = new Capture(value.photo, value.faceCount, value.qualityAccepted);
+        capture = new Capture(value.photo, value.faceCount, value.qualityAccepted,value.provenance);
         enter(Stage.ANALYZING);
+        if(qualifiedCaptureObserver!=null&&membership==Membership.MATCHED){
+            byte[] borrowedScene=capture.photo.clone();
+            try{qualifiedCaptureObserver.captured(snapshot(),borrowedScene,capture.provenance,clock.elapsedMillis());}
+            catch(RuntimeException|LinkageError observerFailure){/* Optional enrollment cannot revoke manufacturer verification. */}
+            finally{Arrays.fill(borrowedScene,(byte)0);}
+        }
         comparisonChip = card.photo.clone(); comparisonLive = capture.photo.clone();
         algorithm.compare(sessionId, comparisonChip, comparisonLive,
                 reply(sessionId, Stage.ANALYZING, this::onComparison));
@@ -362,6 +437,14 @@ public final class Verification {
         if (value == null || value.liveness == null || value.algorithmVersion == null
                 || !value.algorithmVersion.matches("[A-Za-z0-9._:/-]{1,96}")) {
             finish(Verdict.UNAVAILABLE, Error.INVALID_COMPARISON, null); return;
+        }
+        if (value.scoresOnly) {
+            if (!finite(value.score) || !finite(value.liveGrade) || value.score<0 || value.score>100
+                    || value.liveGrade<0 || value.liveGrade>100 || value.threshold!=null || value.rule!=null) {
+                finish(Verdict.UNAVAILABLE, Error.INVALID_COMPARISON, null); return;
+            }
+            scoresOnly=true;liveGrade=value.liveGrade;
+            finish(Verdict.UNAVAILABLE,Error.NONE,value);return;
         }
         if (value.liveness == Liveness.UNAVAILABLE) {
             finish(Verdict.UNAVAILABLE, Error.INVALID_COMPARISON, value); return;
@@ -379,6 +462,7 @@ public final class Verification {
     }
 
     private void finish(Verdict verdict, Error error, Comparison comparison) {
+        if(!operationCurrent()){discardRevoked();return;}
         stage = Stage.FINISHED; // Invalidate callbacks BEFORE calling adapter cancellation.
         String masked = card == null ? "—" : "**************" + card.number.substring(14);
         result = new Record(sessionId, clock.wallMillis(), mode, masked,
@@ -389,7 +473,8 @@ public final class Verification {
                 comparison == null || !finite(comparison.score) ? null : comparison.score,
                 comparison == null || !finite(comparison.threshold) ? null : comparison.threshold,
                 comparison == null ? null : comparison.rule,
-                comparison == null ? "UNCONNECTED" : comparison.algorithmVersion,pinnedRoster==null?"":pinnedRoster.batchId,membership);
+                comparison == null ? "UNCONNECTED" : comparison.algorithmVersion,pinnedRoster==null?"":pinnedRoster.batchId,membership,
+                membership==Membership.MATCHED&&athlete!=null?athlete.bib:"");
         try { device.cancel(sessionId); } catch (RuntimeException | LinkageError ignored) { /* Already invalid. */ }
         try { if(frames==null)algorithm.cancel(sessionId);else frames.cancel(sessionId); } catch (RuntimeException | LinkageError ignored) { /* Already invalid. */ }
         erasePhotos();
@@ -397,8 +482,15 @@ public final class Verification {
     }
 
     private void persist() {
-        try { store.save(result); saveState = SaveState.SAVED; }
-        catch (IOException | RuntimeException ex) { saveState = SaveState.FAILED; }
+        if(!operationCurrent()){discardRevoked();return;}
+        try { checkIn=operationGuard==null?store.saveCheckIn(result):operationGuard.commit(operationLease,store,result);if(checkIn==null)throw new IOException("Commit classification unavailable");saveState = SaveState.SAVED; }
+        catch (IOException | RuntimeException ex) { if(!operationCurrent()){discardRevoked();return;}saveState = SaveState.FAILED;checkIn=CheckIn.State.NOT_SUCCESS; }
+    }
+    private void discardRevoked(){
+        String revoked=sessionId;stage=Stage.FINISHED;
+        try{device.cancel(revoked);}catch(RuntimeException|LinkageError ignored){}
+        try{if(frames==null)algorithm.cancel(revoked);else frames.cancel(revoked);}catch(RuntimeException|LinkageError ignored){}
+        reset();
     }
     private void requireSaved() {
         if (saveState == SaveState.FAILED) {
@@ -406,8 +498,10 @@ public final class Verification {
         }
     }
     private void reset() {
+        scoresOnly=false;liveGrade=null;
         erasePhotos(); card = null; capture = null; result = null;
         sessionId = ""; stage = Stage.IDLE; saveState = SaveState.NONE;currentFrameObserved=false;
+        checkIn=CheckIn.State.NOT_SUCCESS;
         pinnedRoster=null;athlete=null;membership=rosterProvider==null?Membership.LEGACY_NOT_EVALUATED:Membership.NO_ROSTER;
     }
     private void erasePhotos() {

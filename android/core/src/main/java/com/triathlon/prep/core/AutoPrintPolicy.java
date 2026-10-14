@@ -14,7 +14,7 @@ public final class AutoPrintPolicy {
         Claim claim(String receiptKey) throws Exception;
     }
     public enum Reason { PRINT_DISABLED, MANUAL_MODE, NOT_FRESH, STALE_SESSION, INELIGIBLE, WAITING_FOR_SAVE,
-        ALREADY_CLAIMED, STORE_FAILED, DISPATCHED_UNCONFIRMED, SUBMIT_FAILED_UNCONFIRMED }
+        ALREADY_CLAIMED, STORE_FAILED, DISPATCHED_UNCONFIRMED, SUBMIT_FAILED_UNCONFIRMED, DUPLICATE_CHECKIN, HISTORY_UNLINKABLE }
     public static final class Attempt {
         public final Reason reason;
         public final String jobId;
@@ -97,6 +97,8 @@ public final class AutoPrintPolicy {
             return attempt(Reason.INELIGIBLE, null, simulation);
         if (snapshot.saveState != Verification.SaveState.SAVED)
             return attempt(Reason.WAITING_FOR_SAVE, null, simulation);
+        if(snapshot.checkIn==CheckIn.State.DUPLICATE){fresh=false;return attempt(Reason.DUPLICATE_CHECKIN,null,simulation);}
+        if(snapshot.checkIn==CheckIn.State.UNLINKABLE){fresh=false;return attempt(Reason.HISTORY_UNLINKABLE,null,simulation);}
         CheckInReceipt.Document document = currentDocument(flow, snapshot);
         if (document == null) { fresh = false; return attempt(Reason.INELIGIBLE, null, simulation); }
         if (printing == null || layout == null) {
@@ -128,6 +130,11 @@ public final class AutoPrintPolicy {
         if (owner == flow && sessionId != null && sessionId.equals(snapshot.sessionId)) fresh = false;
         Claim claim = reserve(snapshot);
         return claim == Claim.CLAIMED || claim == Claim.ALREADY_CLAIMED;
+    }
+    /** Explicit human channel only; never participates in automatic fresh-session dispatch. */
+    public synchronized boolean beforeManualPassportPrint(ManualPrintAuthorization authority){
+        if(!printingAllowed()||authority==null||!authority.current())return false;
+        try{Claim claim=store.claim("MANUAL_PASSPORT|"+authority.record.key()+"|"+authority.record.id);return claim==Claim.CLAIMED||authority.reprint&&claim==Claim.ALREADY_CLAIMED;}catch(Exception|LinkageError error){return false;}
     }
     private Claim reserve(Verification.Snapshot snapshot) {
         try {

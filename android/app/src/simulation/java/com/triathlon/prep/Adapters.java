@@ -21,6 +21,13 @@ final class Adapters {
                 reply.accepted();
             }
             public void cancel(String id){}
+            public void printImage(String id,ReceiptPrintController.Raster image,ReceiptPrintController.Reply reply){
+                // PNG capability is a simulation only; this source set has no manufacturer port.
+                if(image==null||image.paperHeight>=image.height)reply.failed(ReceiptPrintController.Failure.PRINTER_ERROR);else reply.accepted();
+            }
+            public void printManualImage(String id,ReceiptPrintController.Raster image,com.triathlon.prep.core.ManualPrintAuthorization authority,ReceiptPrintController.Reply reply){
+                if(authority==null||authority.mode!=Verification.Mode.TEST||!authority.current())reply.failed(ReceiptPrintController.Failure.INELIGIBLE);else printImage(id,image,reply);
+            }
         };
     }
     static Verification.DeviceAdapter device() {
@@ -30,7 +37,7 @@ final class Adapters {
                 reply.ok(new Verification.Card("合成证件甲", "990101200001010014", new byte[]{1}));
             }
             public void capture(String id, Verification.Reply<Verification.Capture> reply) {
-                reply.ok(new Verification.Capture(new byte[]{2}, 1, true));
+                reply.ok(new Verification.Capture(new byte[]{2},1,true,new Verification.SceneMetadata(java.util.UUID.randomUUID().toString(),android.os.SystemClock.elapsedRealtime(),0,1,1,0,false,Verification.SceneMetadata.Encoding.SYNTHETIC)));
             }
             public void cancel(String id) { }
         };

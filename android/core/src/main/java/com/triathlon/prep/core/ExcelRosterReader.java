@@ -11,10 +11,11 @@ import org.apache.poi.hssf.usermodel.*;
 
 /** Bounded read-only BIFF8 XLS / OOXML XLSX import. No formulas, macros or external links executed. */
 public final class ExcelRosterReader {
- public enum Field { FILE, EVENT, GROUP, BIB, NAME, ID_NUMBER, TEAM, ROW, SWIMMING_TEST }
+ public enum WorksheetScope { ALL_WORKSHEETS, FIRST_WORKSHEET }
+ public enum Field { FILE, EVENT, GROUP, BIB, NAME, ID_NUMBER, TEAM, ROW, SWIMMING_TEST, PASSPORT_NUMBER, DOCUMENT_TYPE }
  public enum Code { UNSUPPORTED_FILE, UNREADABLE_FILE, MISSING_COLUMN, REQUIRED, INVALID_ID_LENGTH,
   INVALID_ID_DATE, INVALID_ID_CHECKSUM, LOST_PRECISION, DUPLICATE_ID, DUPLICATE_BIB,
-  AMBIGUOUS_CONTEXT, EMPTY_FILE, TOO_LARGE, INVALID_CELL, OTHER }
+  AMBIGUOUS_CONTEXT, INVALID_DOCUMENT_NUMBER, EMPTY_FILE, TOO_LARGE, INVALID_CELL, OTHER }
  public static final class Problem {
   public final int sheet,row;public final Field field;public final Code code;
   Problem(int sheet,int row,Field field,Code code){this.sheet=sheet;this.row=row;this.field=field;this.code=code;}
@@ -35,13 +36,17 @@ public final class ExcelRosterReader {
   System.setProperty("log4j2.statusLoggerLevel","OFF");
  }
  public static Preview read(InputStream source,String fileName,String eventName,String fallbackGroup) {
+  return read(source,fileName,eventName,fallbackGroup,WorksheetScope.ALL_WORKSHEETS);
+ }
+ public static Preview read(InputStream source,String fileName,String eventName,String fallbackGroup,WorksheetScope scope) {
+  Objects.requireNonNull(scope,"Explicit worksheet scope required");
   String id=UUID.randomUUID().toString();List<Problem> errors=new ArrayList<>();String event=eventName==null?"":eventName.trim(),group=fallbackGroup==null?"":fallbackGroup.trim();
   try {
    if(source==null)throw new IOException("Missing file");
    byte[] data=bounded(source,FILE_LIMIT);String lower=fileName==null?"":fileName.toLowerCase(Locale.ROOT);
    List<Sheet> sheets;
-   if(lower.endsWith(".xls")&&data.length>=8&&data[0]==(byte)0xd0&&data[1]==(byte)0xcf&&data[2]==0x11&&data[3]==(byte)0xe0)sheets=xls(data);
-   else if(lower.endsWith(".xlsx")&&data.length>=4&&data[0]=='P'&&data[1]=='K')sheets=xlsx(data);
+   if(lower.endsWith(".xls")&&data.length>=8&&data[0]==(byte)0xd0&&data[1]==(byte)0xcf&&data[2]==0x11&&data[3]==(byte)0xe0)sheets=xls(data,scope);
+   else if(lower.endsWith(".xlsx")&&data.length>=4&&data[0]=='P'&&data[1]=='K')sheets=xlsx(data,scope);
    else return failed(id,event,Code.UNSUPPORTED_FILE);
    List<RaceRoster.Entry> accepted=new ArrayList<>();Set<String> ids=new HashSet<>(),bibs=new HashSet<>();int total=0,invalid=0;
    for(int si=0;si<sheets.size();si++) {
@@ -50,7 +55,7 @@ public final class ExcelRosterReader {
     for(int ri=0;ri<Math.min(50,sheet.rows.size());ri++){
      Map<Field,Integer> found=new EnumMap<>(Field.class);boolean duplicate=false;
      for(Map.Entry<Integer,Cell> c:sheet.rows.get(ri).cells.entrySet()) {Field f=header(c.getValue().text);if(f!=null&&found.put(f,c.getKey())!=null)duplicate=true;}
-     if(found.containsKey(Field.ID_NUMBER)&&found.containsKey(Field.BIB)&&found.containsKey(Field.NAME)){
+     if((found.containsKey(Field.ID_NUMBER)||found.containsKey(Field.PASSPORT_NUMBER))&&found.containsKey(Field.BIB)&&found.containsKey(Field.NAME)){
       if(duplicate){errors.add(new Problem(si+1,sheet.rows.get(ri).number,Field.ROW,Code.AMBIGUOUS_CONTEXT));break;}
       columns=found;start=ri+1;break;
      }
@@ -60,6 +65,18 @@ public final class ExcelRosterReader {
      Row row=sheet.rows.get(ri);boolean empty=true;for(Integer c:columns.values()){Cell v=row.cells.get(c);if(v!=null&&!v.text.trim().isEmpty())empty=false;}if(empty)continue;
      if(++total>RaceRoster.MAX_ROWS)return failed(id,event,Code.TOO_LARGE);
      int before=errors.size();String bib=text(row,columns,Field.BIB,si,errors),name=text(row,columns,Field.NAME,si,errors),identity=text(row,columns,Field.ID_NUMBER,si,errors),team=text(row,columns,Field.TEAM,si,errors);
+     String passport=text(row,columns,Field.PASSPORT_NUMBER,si,errors),declared=text(row,columns,Field.DOCUMENT_TYPE,si,errors).toUpperCase(Locale.ROOT);
+     boolean passportColumn=!passport.isEmpty();
+     if(passportColumn&&!identity.isEmpty())errors.add(new Problem(si+1,row.number,Field.ID_NUMBER,Code.AMBIGUOUS_CONTEXT));
+     if(passportColumn)identity=passport;
+     DocumentNumber.Type type;
+     if(Arrays.asList("护照","PASSPORT").contains(declared))type=DocumentNumber.Type.PASSPORT;
+     else if(Arrays.asList("身份证","居民身份证","ID_CARD","IDCARD").contains(declared))type=DocumentNumber.Type.ID_CARD;
+     else {if(!declared.isEmpty())errors.add(new Problem(si+1,row.number,Field.ID_NUMBER,Code.AMBIGUOUS_CONTEXT));
+       Integer idColumn=columns.get(Field.ID_NUMBER);Cell titleCell=idColumn==null?null:sheet.rows.get(start-1).cells.get(idColumn);String title=titleCell==null?"":titleCell.text.trim();
+       type=passportColumn||columns.containsKey(Field.PASSPORT_NUMBER)&&!columns.containsKey(Field.ID_NUMBER)?DocumentNumber.Type.PASSPORT:title.startsWith("身份证")||identity.matches("[0-9]{17}[0-9Xx]")?DocumentNumber.Type.ID_CARD:DocumentNumber.Type.PASSPORT;
+     }
+     if(passportColumn&&type!=DocumentNumber.Type.PASSPORT)errors.add(new Problem(si+1,row.number,Field.ID_NUMBER,Code.AMBIGUOUS_CONTEXT));
      String rowGroup=columns.containsKey(Field.GROUP)?text(row,columns,Field.GROUP,si,errors):group;
      String rowEvent=columns.containsKey(Field.EVENT)?text(row,columns,Field.EVENT,si,errors):event;
      if(event.isEmpty()&&!rowEvent.isEmpty())event=rowEvent;
@@ -70,12 +87,13 @@ public final class ExcelRosterReader {
       if(v.isEmpty())errors.add(new Problem(si+1,row.number,f,Code.REQUIRED));
      }
      String normalized=null;
-     Cell sourceId=row.cells.get(columns.get(Field.ID_NUMBER));
-     if(sourceId!=null&&(sourceId.numeric||identity.matches("[0-9]+(?:\\.[0-9]+)?[eE][+-]?[0-9]+")))errors.add(new Problem(si+1,row.number,Field.ID_NUMBER,Code.LOST_PRECISION));
-     else if(!identity.isEmpty())try{normalized=IdentityNumber.normalize(identity);}catch(IdentityNumber.Invalid ex){errors.add(new Problem(si+1,row.number,Field.ID_NUMBER,Code.valueOf(ex.reason.name())));}
+     Cell sourceId=row.cells.get(columns.get(passportColumn?Field.PASSPORT_NUMBER:Field.ID_NUMBER));
+     boolean explicitPassport=type==DocumentNumber.Type.PASSPORT&&(passportColumn||columns.containsKey(Field.PASSPORT_NUMBER)||!declared.isEmpty());
+     if(sourceId!=null&&(sourceId.numeric||!explicitPassport&&identity.matches("[0-9]+(?:\\.[0-9]+)?[eE][+-]?[0-9]+")))errors.add(new Problem(si+1,row.number,Field.ID_NUMBER,Code.LOST_PRECISION));
+     else if(!identity.isEmpty())try{normalized=RaceRoster.sourceKey(type,identity);}catch(IdentityNumber.Invalid ex){errors.add(new Problem(si+1,row.number,Field.ID_NUMBER,Code.valueOf(ex.reason.name())));}catch(IllegalArgumentException ex){errors.add(new Problem(si+1,row.number,Field.ID_NUMBER,Code.INVALID_DOCUMENT_NUMBER));}
      if(normalized!=null&&!ids.add(normalized))errors.add(new Problem(si+1,row.number,Field.ID_NUMBER,Code.DUPLICATE_ID));
      if(!bib.isEmpty()&&!bibs.add(bib))errors.add(new Problem(si+1,row.number,Field.BIB,Code.DUPLICATE_BIB));
-     if(errors.size()==before)try{accepted.add(new RaceRoster.Entry(normalized,bib,name,rowGroup,team,swimming(row,columns)));RaceRoster.required(event,128);}catch(IllegalArgumentException ex){errors.add(new Problem(si+1,row.number,Field.ROW,Code.INVALID_CELL));}
+     if(errors.size()==before)try{accepted.add(RaceRoster.Entry.fromSourceText(type,identity,bib,name,rowGroup,team,swimming(row,columns)));RaceRoster.required(event,128);}catch(IllegalArgumentException ex){errors.add(new Problem(si+1,row.number,Field.ROW,Code.INVALID_CELL));}
      if(errors.size()!=before)invalid++;
     }
    }
@@ -94,6 +112,8 @@ public final class ExcelRosterReader {
   String s=raw==null?"":raw.trim();
   if(Arrays.asList("出发号","比赛号码","参赛号","参赛号码","比赛号").contains(s))return Field.BIB;
   if(Arrays.asList("姓名","选手姓名").contains(s))return Field.NAME;
+  if(Arrays.asList("护照号","护照号码").contains(s))return Field.PASSPORT_NUMBER;
+  if(Arrays.asList("证件类型","证件类别").contains(s))return Field.DOCUMENT_TYPE;
   if(Arrays.asList("证件号码","身份证号","身份证号码","证件号").contains(s))return Field.ID_NUMBER;
   if(Arrays.asList("参赛组别","组别","比赛组别").contains(s))return Field.GROUP;
   if(Arrays.asList("所属团体会员","所属团体","团体","所属单位","团队").contains(s))return Field.TEAM;
@@ -113,11 +133,12 @@ public final class ExcelRosterReader {
   if(Arrays.asList("√","✓","✔").contains(value))return RaceRoster.SwimTest.MARKED;
   return RaceRoster.SwimTest.UNKNOWN;
  }
- private static List<Sheet> xls(byte[] data)throws IOException{
+ private static List<Sheet> xls(byte[] data,WorksheetScope scope)throws IOException{
   List<Sheet> sheets=new ArrayList<>();
   try(HSSFWorkbook book=new HSSFWorkbook(new ByteArrayInputStream(data))){
    if(book.getNumberOfSheets()>32)throw new Limit();int count=0;
-   for(int s=0;s<book.getNumberOfSheets();s++){
+   int selected=scope==WorksheetScope.FIRST_WORKSHEET?Math.min(1,book.getNumberOfSheets()):book.getNumberOfSheets();
+   for(int s=0;s<selected;s++){
     Sheet target=new Sheet();for(org.apache.poi.ss.usermodel.Row source:book.getSheetAt(s)){
      if(++count>RaceRoster.MAX_ROWS+1600)throw new Limit();Row row=new Row(source.getRowNum()+1);
      for(org.apache.poi.ss.usermodel.Cell cell:source){if(cell.getColumnIndex()>127)continue;String v="";boolean number=false,invalid=false;
@@ -134,7 +155,7 @@ public final class ExcelRosterReader {
    }
   }return sheets;
  }
- private static List<Sheet> xlsx(byte[] data)throws Exception{
+ private static List<Sheet> xlsx(byte[] data,WorksheetScope scope)throws Exception{
   Map<String,byte[]> parts=new HashMap<>();int total=0,count=0;
   try(ZipInputStream zip=new ZipInputStream(new ByteArrayInputStream(data))){ZipEntry entry;while((entry=zip.getNextEntry())!=null){
    if(++count>256)throw new Limit();if(entry.isDirectory())continue;String name=entry.getName();
@@ -146,7 +167,8 @@ public final class ExcelRosterReader {
   Map<String,String> relations=new HashMap<>();parse(parts.get("xl/_rels/workbook.xml.rels"),new SafeXml(){public void startElement(String uri,String local,String q,Attributes a)throws SAXException{if(tag(local,q).equals("Relationship")){String target=a.getValue("Target");if("External".equals(a.getValue("TargetMode")))return;String normalized=URI.create("xl/").resolve(target).normalize().getPath();if(normalized.startsWith("/"))normalized=normalized.substring(1);relations.put(a.getValue("Id"),normalized);}}});
   List<String> strings=new ArrayList<>();if(parts.containsKey("xl/sharedStrings.xml"))parse(parts.get("xl/sharedStrings.xml"),new SafeXml(){StringBuilder value;boolean text,phonetic;public void startElement(String uri,String local,String q,Attributes a)throws SAXException{String t=tag(local,q);if(t.equals("si"))value=new StringBuilder();if(t.equals("rPh"))phonetic=true;if(t.equals("t"))text=true;}public void characters(char[] ch,int start,int len)throws SAXException{if(text&&!phonetic&&value!=null){value.append(ch,start,len);if(value.length()>1024)throw new SAXException("Limit");}}public void endElement(String uri,String local,String q)throws SAXException{String t=tag(local,q);if(t.equals("t"))text=false;if(t.equals("rPh"))phonetic=false;if(t.equals("si")){if(strings.size()>RaceRoster.MAX_ROWS*8)throw new SAXException("Limit");strings.add(value.toString());value=null;}}});
   if(sheetIds.size()>32)throw new Limit();List<Sheet> sheets=new ArrayList<>();
-  for(String id:sheetIds){String path=relations.get(id);if(path==null||!path.startsWith("xl/worksheets/"))throw new IOException("Missing worksheet");Sheet sheet=new Sheet();
+  List<String> selected=scope==WorksheetScope.FIRST_WORKSHEET?sheetIds.subList(0,Math.min(1,sheetIds.size())):sheetIds;
+  for(String id:selected){String path=relations.get(id);if(path==null||!path.startsWith("xl/worksheets/"))throw new IOException("Missing worksheet");Sheet sheet=new Sheet();
    parse(parts.get(path),new SafeXml(){Row row;String type;StringBuilder value;boolean inValue,formula;int column;
     public void startElement(String uri,String local,String q,Attributes a)throws SAXException{String t=tag(local,q);
      if(t.equals("row")){int n=a.getValue("r")==null?sheet.rows.size()+1:Integer.parseInt(a.getValue("r"));if(n<1||n>1048576||sheet.rows.size()>RaceRoster.MAX_ROWS+50)throw new SAXException("Limit");row=new Row(n);}

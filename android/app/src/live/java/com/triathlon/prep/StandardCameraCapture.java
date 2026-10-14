@@ -3,6 +3,7 @@ import com.triathlon.prep.core.Verification;
 import com.triathlon.prep.cefk.hardware.CefkDeviceAdapter;
 import java.util.Arrays;
 import java.util.concurrent.*;
+import android.os.SystemClock;
 /** One memory-only Camera2 capture per verification session; never produces identity/liveness scores. */
 public final class StandardCameraCapture implements CefkDeviceAdapter.CapturePort {
  public interface Inspector { Image inspect(byte[] jpeg,CameraModule.Config config,int requestedRotation)throws Exception; }
@@ -13,8 +14,12 @@ public final class StandardCameraCapture implements CefkDeviceAdapter.CapturePor
   void finished();
  }
  public static final class Image implements AutoCloseable{
-  public final int faceCount;public final boolean qualityReady;private byte[] png;
-  public Image(byte[] png,int faceCount,boolean qualityReady){this.png=png==null?null:png.clone();this.faceCount=faceCount;this.qualityReady=qualityReady;}
+  public final int faceCount,width,height;public final boolean qualityReady;private byte[] png;
+  public Image(byte[] png,int faceCount,boolean qualityReady){this(png,faceCount,qualityReady,0,0);}
+  public Image(byte[] png,int faceCount,boolean qualityReady,int width,int height){
+   if(!((width==0&&height==0)||(width>0&&height>0&&width<=4096&&height<=4096&&(long)width*height<=4_000_000)))throw new IllegalArgumentException("Normalized image dimensions invalid");
+   this.png=png==null?null:png.clone();this.faceCount=faceCount;this.qualityReady=qualityReady;this.width=width;this.height=height;
+  }
   public synchronized byte[] copy(){return png==null?null:png.clone();}
   public synchronized void close(){if(png!=null){Arrays.fill(png,(byte)0);png=null;}}
  }
@@ -23,7 +28,8 @@ public final class StandardCameraCapture implements CefkDeviceAdapter.CapturePor
  private final ExecutorService worker=Executors.newSingleThreadExecutor(r->{Thread t=new Thread(r,"standard-camera-image");t.setDaemon(true);return t;});
  private final ScheduledExecutorService timer=Executors.newSingleThreadScheduledExecutor(r->{Thread t=new Thread(r,"standard-camera-deadline");t.setDaemon(true);return t;});
  private static final class Job{
-  final String id;final Verification.Reply<Verification.Capture> reply;ScheduledFuture<?> deadline,previewWait;
+  final String id;final String frameId=java.util.UUID.randomUUID().toString();final Verification.Reply<Verification.Capture> reply;ScheduledFuture<?> deadline,previewWait;
+  long requestStartedElapsed;boolean shot;
   Job(String id,Verification.Reply<Verification.Capture> reply){this.id=id;this.reply=reply;}
  }
  public StandardCameraCapture(CameraModule camera,CameraModule.Config config,Inspector inspector,long timeoutMillis){
@@ -63,7 +69,7 @@ public final class StandardCameraCapture implements CefkDeviceAdapter.CapturePor
   });}catch(RuntimeException|LinkageError ex){finish(selected,null,Verification.Error.SDK_EXCEPTION);}
  }
  private void shoot(Job selected){
-    if(!active(selected))return;
+    synchronized(lock){if(closed||current!=selected||selected.shot)return;selected.shot=true;selected.requestStartedElapsed=SystemClock.elapsedRealtime();}
     camera.capture(selected.id,new CameraModule.CaptureReply(){
      public void ok(CameraModule.Frame frame){
       if(!active(selected)){frame.close();return;}
@@ -81,7 +87,9 @@ public final class StandardCameraCapture implements CefkDeviceAdapter.CapturePor
    png=image==null?null:image.copy();
    if(png==null||png.length<8||png.length>8*1024*1024||!Arrays.equals(Arrays.copyOf(png,8),new byte[]{(byte)137,80,78,71,13,10,26,10})
      ||image.faceCount<0||image.faceCount>2)throw new CameraModule.Failure(CameraModule.Error.INVALID_IMAGE);
-   finish(job,new Verification.Capture(png,image.faceCount,image.qualityReady),null);
+   Verification.SceneMetadata provenance=image.width==0?null:new Verification.SceneMetadata(job.frameId,job.requestStartedElapsed,frame.sensorTimestamp,
+    image.width,image.height,0,false,Verification.SceneMetadata.Encoding.PNG);
+   finish(job,new Verification.Capture(png,image.faceCount,image.qualityReady,provenance),null);
   }catch(CameraModule.Failure ex){finish(job,null,map(ex.error));}
   catch(Exception|LinkageError ex){finish(job,null,Verification.Error.BAD_CAPTURE);}
   catch(OutOfMemoryError ex){finish(job,null,Verification.Error.BAD_CAPTURE);}

@@ -20,14 +20,18 @@ public final class CshtReaderFactory implements CefkCardReader.Factory {
         private final String serialPath, appId, appKey, appSecret;
         private final int baud;
         private final byte[] samCode;
+        private final String serviceHost;private final int servicePort;
         /** Caller must explicitly supply manufacturer-confirmed offline mode and credentials policy.
          * Empty credential strings are permitted only when the manufacturer confirms they are unused.
          * ReadCardManager.init(Application) must already have been separately authorized and performed.
          */
         public Configuration(ReadCardType type, String serialPath, int baud,
                 String appId, String appKey, String appSecret, byte[] samCode) {
-            if (type != ReadCardType.SAM_USB && type != ReadCardType.SAM_SERIALPORT)
-                throw new IllegalArgumentException("Only explicit offline SAM modes supported");
+            this(type,serialPath,baud,appId,appKey,appSecret,samCode,null,0);
+        }
+        public Configuration(ReadCardType type,String serialPath,int baud,String appId,String appKey,String appSecret,byte[] samCode,String serviceHost,int servicePort){
+            if (type != ReadCardType.USB && type != ReadCardType.SAM_USB && type != ReadCardType.SAM_SERIALPORT)
+                throw new IllegalArgumentException("Explicit USB or SAM reader mode required");
             if (type == ReadCardType.SAM_SERIALPORT && (serialPath == null
                     || !serialPath.startsWith("/dev/") || baud <= 0))
                 throw new IllegalArgumentException("Serial parameters required");
@@ -37,6 +41,8 @@ public final class CshtReaderFactory implements CefkCardReader.Factory {
             this.type = type; this.serialPath = serialPath; this.baud = baud;
             this.appId = appId; this.appKey = appKey; this.appSecret = appSecret;
             this.samCode = samCode == null ? null : samCode.clone();
+            if(serviceHost!=null&&(!"yfs4.sfzydq.com".equals(serviceHost)||servicePort!=9999||type!=ReadCardType.USB))throw new IllegalArgumentException("Explicit supported reader service required");
+            this.serviceHost=serviceHost;this.servicePort=servicePort;
         }
     }
     // The vendor manager and its settings are global. A second factory must not reconfigure it.
@@ -77,6 +83,8 @@ public final class CshtReaderFactory implements CefkCardReader.Factory {
             if (config.type == ReadCardType.SAM_SERIALPORT)
                 builder.buildSerialPort(config.serialPath, config.baud);
             if (config.samCode != null) builder.buildSAMCode(config.samCode.clone());
+            if(config.type==ReadCardType.USB)builder.buildPingNetHeartbeat(false,30000).buildQyWxGroupUrl("","");
+            if(config.serviceHost!=null)builder.buildIpAndPort(config.serviceHost,config.servicePort);
             manager = builder.buildCreate();
             manager.readCardInit((code, ignoredMessage) -> {
                 if (stopped || code == StatusCode.ININ_ING.getCode()) return;

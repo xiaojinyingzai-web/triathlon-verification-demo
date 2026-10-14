@@ -30,6 +30,16 @@ public final class CefkPrinter implements AutoCloseable {
             throw new IllegalArgumentException("Explicit dot width/encoding required");
         this.port = port; this.dotWidth = dotWidth; this.encoding = encoding;
     }
+    /** Observe current connection before an explicit attempt; a previous open request is not readiness. */
+    public State connectionState() {
+        synchronized (lock) {
+            if (closed) return State.CLOSED;
+            if (port == null) return State.UNCONFIGURED;
+            if (ioBusy) return State.BUSY;
+            try { return port.connected() ? State.READY : State.NOT_CONNECTED; }
+            catch (RuntimeException | LinkageError ex) { return State.SDK_EXCEPTION; }
+        }
+    }
     /** Call on a caller-owned I/O executor. open request is not a readiness or printing guarantee. */
     public State open() {
         synchronized (lock) {

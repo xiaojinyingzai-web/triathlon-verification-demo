@@ -68,6 +68,15 @@ tasks.register('autoPrintCheck', JavaExec) {
     enableAssertions = true
 }
 check.dependsOn autoPrintCheck
+tasks.register('rosterExportCheck', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.triathlon.prep.core.RosterStatusExportSelfCheck'
+    args providers.gradleProperty('prep29ExportData').getOrElse(layout.buildDirectory.dir('export-check-data').get().asFile.absolutePath)
+    args providers.gradleProperty('prep29OldData').getOrElse(layout.buildDirectory.dir('export-old27-copy').get().asFile.absolutePath)
+    enableAssertions = true
+}
+check.dependsOn rosterExportCheck
 tasks.withType(JavaExec).configureEach {
     systemProperty 'file.encoding', 'UTF-8'
     systemProperty 'log4j2.loggerContextFactory', 'org.apache.logging.log4j.simple.SimpleLoggerContextFactory'

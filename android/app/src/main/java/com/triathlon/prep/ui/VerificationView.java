@@ -61,6 +61,7 @@ public final class VerificationView extends ScrollView {
         public final PrimaryAction primaryAction;
         public final Tone tone;
         public final RosterInfo rosterInfo;
+        public final boolean scoresOnly;
 
         public Model(boolean simulation, int step, String title, String message,
                 String instruction, String name, String maskedNumber, String score,
@@ -75,6 +76,14 @@ public final class VerificationView extends ScrollView {
                 String liveness, String saveStatus, Bitmap certificatePhoto,
                 Bitmap livePhoto, PrimaryAction primaryAction, boolean primaryEnabled,
                 boolean cancelEnabled, Tone tone, RosterInfo rosterInfo) {
+            this(simulation,step,title,message,instruction,name,maskedNumber,score,liveness,
+                    saveStatus,certificatePhoto,livePhoto,primaryAction,primaryEnabled,cancelEnabled,tone,rosterInfo,false);
+        }
+        public Model(boolean simulation, int step, String title, String message,
+                String instruction, String name, String maskedNumber, String score,
+                String liveness, String saveStatus, Bitmap certificatePhoto,
+                Bitmap livePhoto, PrimaryAction primaryAction, boolean primaryEnabled,
+                boolean cancelEnabled, Tone tone, RosterInfo rosterInfo, boolean scoresOnly) {
             if (step < 1 || step > 4) throw new IllegalArgumentException("step must be 1..4");
             if (primaryAction == null || tone == null) throw new IllegalArgumentException("action/tone required");
             this.simulation = simulation; this.step = step; this.title = title;
@@ -85,7 +94,10 @@ public final class VerificationView extends ScrollView {
             this.primaryEnabled = primaryEnabled; this.cancelEnabled = cancelEnabled;
             this.tone = tone;
             this.rosterInfo=rosterInfo;
+            this.scoresOnly=scoresOnly;
         }
+        String metricsText(){return (scoresOnly?"人脸分数：":"相似度：")+metricValue(score)+"\n"+(scoresOnly?"活体分数：":"活体：")+metricValue(liveness)+"   记录："+metricValue(saveStatus);}
+        private static String metricValue(String text){return text==null||text.trim().isEmpty()?"—":text;}
     }
 
     private static final int INK = Color.rgb(22,38,56), MUTED = Color.rgb(99,116,135);
@@ -222,7 +234,7 @@ public final class VerificationView extends ScrollView {
         mode.setText(m.simulation?"虚构测试":"正式模式");
         title.setText(value(m.title));message.setText(value(m.message));
         instruction.setText(m.simulation&&m.primaryAction==PrimaryAction.BEGIN&&"点击开始虚构测试".equals(m.instruction)
-                ?"等待开始本轮测试":value(m.instruction));
+                ?"模拟刷卡后自动核验":value(m.instruction));
         name.setText(value(m.name));number.setText(value(m.maskedNumber));
         RosterInfo r=m.rosterInfo;
         if(r==null)rosterText.setText("名单状态待同步 · 以当前核验结果为准");
@@ -230,7 +242,7 @@ public final class VerificationView extends ScrollView {
             if(r.matched)roster+="\n名单姓名："+value(r.athleteName)+"   比赛号码："+value(r.bib)+"\n组别："+value(r.group)+"\n团体："+(empty(r.team)?"未提供":r.team);
             rosterText.setText(roster);}
         showPhotos(m.certificatePhoto,m.livePhoto);
-        metrics.setText("相似度："+value(m.score)+"\n活体："+value(m.liveness)+"   记录："+value(m.saveStatus));
+        metrics.setText(m.metricsText());
         int color=BLUE,bg=Color.rgb(238,245,252);
         if(m.tone==Tone.GOOD){color=Color.rgb(35,108,71);bg=Color.rgb(237,247,241);}
         if(m.tone==Tone.BAD){color=Color.rgb(161,55,48);bg=Color.rgb(252,240,239);}
@@ -239,7 +251,7 @@ public final class VerificationView extends ScrollView {
         for(int i=0;i<4;i++){steps[i].setTextColor(i+1==m.step?BLUE:MUTED);steps[i].setTypeface(Typeface.DEFAULT,i+1==m.step?Typeface.BOLD:Typeface.NORMAL);}
         currentAction=m.primaryAction;
         String label="等待设备就绪";
-        switch(currentAction){case BEGIN:label=m.simulation?"开始虚构测试":"开始读证";break;case RETAKE:label="重新采集";break;case NEXT:label="下一位";break;case RETRY_SAVE:label="重试保存";break;default:break;}
+        switch(currentAction){case BEGIN:label=m.simulation?"模拟刷卡":"开始读证";break;case RETAKE:label="重新采集";break;case NEXT:label="下一位";break;case RETRY_SAVE:label="重试保存";break;default:break;}
         primary.setText(label);primary.setEnabled(m.primaryEnabled&&currentAction!=PrimaryAction.NONE);primary.setAlpha(primary.isEnabled()?1f:.45f);
         refreshAutomaticPrimary();
         cancel.setEnabled(m.cancelEnabled);cancel.setAlpha(m.cancelEnabled?1f:.45f);

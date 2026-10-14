@@ -205,12 +205,14 @@ public final class AutoCardIntake implements AutoCloseable {
         }
         publish(); return true;
     }
-    public void pause() {
+    public void pause() { pause(null); }
+    /** Mode handoff waits for completed source.close(), not the early PAUSED presentation state. */
+    public void pause(java.util.function.Consumer<Boolean> released) {
         synchronized (lock) {
-            if (closed) return;
+            if (closed) { if(released!=null)released.accept(false);return; }
             foreground = false; ++generation; cancelDeadlineLocked(); state = State.PAUSED;
             if (admission != null) admission.close(); admission = null;
-            worker.execute(this::releaseSource);
+            worker.execute(()->{boolean done=releaseSource();synchronized(lock){done=done&&!poisoned&&error!=Error.RELEASE_FAILED;}if(released!=null)released.accept(done);});
         }
         publish();
     }

@@ -33,7 +33,7 @@ public final class LiveRuntime {
   public final ExternalPhoto.Config externalPhoto;
   public final FaceClient.Config face;public final FaceClient.CredentialsProvider credentials;public final CefkFaceAdapter.Parameters decision;
   public final PrinterConfig printer;public final long readerTimeoutMillis,stageTimeoutMillis,printTimeoutMillis;
-  public final boolean executionEnabled,offlineReaderConfirmed,dependenciesConfirmed;
+  public final boolean executionEnabled,offlineReaderConfirmed,dependenciesConfirmed,usbNetworkConfirmed;
   public Config(CshtReaderFactory.Configuration reader,CefkDeviceAdapter.CapturePort capture,FaceClient.Config face,
     FaceClient.CredentialsProvider credentials,CefkFaceAdapter.Parameters decision,PrinterConfig printer,
     long readerTimeoutMillis,long stageTimeoutMillis,long printTimeoutMillis,boolean enabled,boolean offlineConfirmed,boolean dependenciesConfirmed){
@@ -47,6 +47,12 @@ public final class LiveRuntime {
   public Config(CshtReaderFactory.Configuration reader,CefkDeviceAdapter.CapturePort capture,FaceClient.Config face,
     FaceClient.CredentialsProvider credentials,CefkFaceAdapter.Parameters decision,PrinterConfig printer,
     long readerTimeoutMillis,long stageTimeoutMillis,long printTimeoutMillis,boolean enabled,boolean offlineConfirmed,boolean dependenciesConfirmed,CameraModule.Config standardCamera,long stableMillis,long freshMillis,ExternalPhoto.Config externalPhoto){
+   this(reader,capture,face,credentials,decision,printer,readerTimeoutMillis,stageTimeoutMillis,printTimeoutMillis,enabled,offlineConfirmed,dependenciesConfirmed,standardCamera,stableMillis,freshMillis,externalPhoto,false);
+  }
+  public Config(CshtReaderFactory.Configuration reader,CefkDeviceAdapter.CapturePort capture,FaceClient.Config face,
+    FaceClient.CredentialsProvider credentials,CefkFaceAdapter.Parameters decision,PrinterConfig printer,
+    long readerTimeoutMillis,long stageTimeoutMillis,long printTimeoutMillis,boolean enabled,boolean offlineConfirmed,boolean dependenciesConfirmed,CameraModule.Config standardCamera,long stableMillis,long freshMillis,ExternalPhoto.Config externalPhoto,boolean usbNetworkConfirmed){
+   this.usbNetworkConfirmed=usbNetworkConfirmed;
    this.reader=reader;this.capture=capture;this.face=face;this.credentials=credentials;this.decision=decision;this.printer=printer;
    this.readerTimeoutMillis=readerTimeoutMillis;this.stageTimeoutMillis=stageTimeoutMillis;this.printTimeoutMillis=printTimeoutMillis;
    executionEnabled=enabled;offlineReaderConfirmed=offlineConfirmed;this.dependenciesConfirmed=dependenciesConfirmed;
@@ -72,12 +78,13 @@ public final class LiveRuntime {
   return assemble(config,new SdkFactory(app.getApplicationContext()),store,clock,roster);
  }
  private static boolean ready(Config c){
-  if(c==null||!c.executionEnabled||!c.offlineReaderConfirmed||!c.dependenciesConfirmed||c.reader==null||(c.capture==null&&c.standardCamera==null)||(c.capture!=null&&c.capture.mode()!=Verification.Mode.LIVE)
-    ||c.face==null||c.credentials==null||c.decision==null||!c.decision.confirmed
+  if(c==null||!c.executionEnabled||!c.dependenciesConfirmed||c.reader==null
+    ||(c.reader.type==com.csht.enums.ReadCardType.USB?!c.usbNetworkConfirmed:!c.offlineReaderConfirmed)||(c.capture==null&&c.standardCamera==null)||(c.capture!=null&&c.capture.mode()!=Verification.Mode.LIVE)
+    ||c.face==null||c.credentials==null||c.decision==null||(!c.decision.confirmed&&!c.decision.scoresOnly)||(c.decision.scoresOnly&&c.printer!=null)
     ||c.readerTimeoutMillis<1||c.readerTimeoutMillis>300000||c.stageTimeoutMillis<1||c.stageTimeoutMillis>300000||c.printTimeoutMillis<1||c.printTimeoutMillis>300000
     ||c.externalPhoto==null||(c.capture==null&&(c.previewStableMillis<0||c.previewStableMillis>=c.stageTimeoutMillis||c.previewFreshMillis<1||c.previewFreshMillis>5000)))return false;
   FaceClient.Config f=c.face;
-  if(f.mode!=FaceClient.Mode.REAL||!f.realUseAuthorized||!f.imageContractConfirmed||!f.thresholdsConfirmed
+  if(f.mode!=FaceClient.Mode.REAL||!f.realUseAuthorized||!f.imageContractConfirmed||(!c.decision.scoresOnly&&!f.thresholdsConfirmed)
     ||f.byteFormat==null||f.byteFormat==FaceClient.ByteFormat.UNCONFIRMED||f.signCase==null||f.signCase==FaceClient.SignCase.UNCONFIRMED
     ||f.deviceName==null||f.deviceName.trim().isEmpty()||f.deviceNumber==null||f.deviceNumber.trim().isEmpty()
     ||f.timeoutMs<1||f.maxImageBytes<1||f.tokenTtlMs<1||f.tokenTtlMs>1800000)return false;
@@ -96,7 +103,9 @@ public final class LiveRuntime {
     ||parts.reader.mode()!=Verification.Mode.LIVE||parts.algorithm.mode()!=Verification.Mode.LIVE||parts.printer.mode()!=Verification.Mode.LIVE)throw new IllegalStateException("LIVE components required");
    Verification flow=new Verification(Verification.Mode.LIVE,parts.reader,parts.algorithm,store,clock,config.stageTimeoutMillis,roster);
    parts.bind.accept(flow);
-   return new VerificationRuntime(flow,true,parts.close,parts.display,parts.printer,clock,config.printTimeoutMillis,config.printer==null?null:config.printer.layout,parts.inbox,parts.cardSource);
+   VerificationRuntime runtime=new VerificationRuntime(flow,true,parts.close,parts.display,parts.printer,clock,config.printTimeoutMillis,config.printer==null?null:config.printer.layout,parts.inbox,parts.cardSource);
+   if(parts.algorithm instanceof CefkFaceAdapter)runtime.setDiagnosticSource(((CefkFaceAdapter)parts.algorithm)::failureDiagnostic);
+   return runtime;
   }catch(RuntimeException|LinkageError ex){if(parts!=null&&parts.close!=null)try{parts.close.run();}catch(RuntimeException|LinkageError ignored){}return unavailable(store,clock,roster);}
  }
  private static final Object INIT_LOCK=new Object();private static boolean sdkInitialized;

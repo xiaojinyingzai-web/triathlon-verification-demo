@@ -12,9 +12,18 @@ public final class FaceClient {
     public enum SignCase { UNCONFIRMED, LOWER, UPPER }
     public enum Mode { SIMULATION, REAL }
     public enum Error { UNAVAILABLE, INVALID_INPUT, AUTH, SERVICE, PROTOCOL, TIMEOUT, CANCELLED, TRANSPORT }
+    public enum Stage { PREFLIGHT, LOGIN, COMPARE }
+    public enum VendorCode { SUCCESS_00, UNCONFIRMED }
     public static final class Failure extends Exception {
         public final Error error;
-        public Failure(Error error) { super(error.name()); this.error=error; }
+        public final Stage stage;
+        public final int httpStatus;
+        public final VendorCode vendorCode;
+        public Failure(Error error) { this(error,Stage.PREFLIGHT,0,VendorCode.UNCONFIRMED); }
+        Failure(Error error,Stage stage,int httpStatus,VendorCode vendorCode) {
+            super(error.name());this.error=error;this.stage=stage;
+            this.httpStatus=httpStatus>=100&&httpStatus<=599?httpStatus:0;this.vendorCode=vendorCode;
+        }
     }
     public interface CredentialsProvider { Credentials get() throws Exception; }
     public interface Clock { long millis(); }
@@ -44,7 +53,7 @@ public final class FaceClient {
         }
         void check() throws Failure {
             if(mode==null||byteFormat==null||byteFormat==ByteFormat.UNCONFIRMED||signCase==null||signCase==SignCase.UNCONFIRMED
-                ||!imageContractConfirmed||!thresholdsConfirmed||!present(deviceNumber)||!present(deviceName)
+                ||!imageContractConfirmed||!present(deviceNumber)||!present(deviceName)
                 ||timeoutMs<=0||maxImageBytes<=0||tokenTtlMs<=0||tokenTtlMs>1800000L) throw new Failure(Error.UNAVAILABLE);
             if(mode==Mode.REAL) {
                 if(!realUseAuthorized) throw new Failure(Error.UNAVAILABLE);
@@ -114,6 +123,8 @@ public final class FaceClient {
         }
     }
     private Scores executeOwned(Operation op,byte[][] images,Cancellation cancellation) throws Failure {
+        Stage stage=Stage.PREFLIGHT;VendorCode vendor=VendorCode.UNCONFIRMED;
+        try {
         if(closed||config==null||transport==null||clock==null||credentials==null) throw new Failure(Error.UNAVAILABLE);
         config.check(); if(transport.mode()!=config.mode) throw new Failure(Error.UNAVAILABLE);
         if(cancellation==null||op==null) throw new Failure(Error.INVALID_INPUT);
@@ -138,15 +149,18 @@ public final class FaceClient {
             login.put("timestamp",now);login.put("sdkCode",op.name());
             login.put("sign",sign(c,now,config.signCase));login.put("deviceNumber",config.deviceNumber);
             login.put("sdkVersion","2.4.0");login.put("deviceName",config.deviceName);
-            Map<String,Object> reply=call(login,cancellation);checkReply(reply,"login",true);
+            stage=Stage.LOGIN;
+            Map<String,Object> reply=call(login,cancellation);vendor=vendorCode(reply);checkReply(reply,"login",true);
             Object value=reply.get("token");if(!(value instanceof String)||!present((String)value)) throw new Failure(Error.PROTOCOL);
             long expires;
             try { expires=Math.addExact(now,config.tokenTtlMs); } catch(ArithmeticException e){throw new Failure(Error.PROTOCOL);}
             token=new Token((String)value,now,expires);tokens.put(op,token);
         }
+        stage=Stage.COMPARE;vendor=VendorCode.UNCONFIRMED;
         Map<String,Object> request=new LinkedHashMap<>();request.put("type",op.name());request.put("token",token.value);
         request.put(count==2?"dataMulti":"data",count==2?imageArrays:imageArrays.get(0));
         Map<String,Object> reply=call(request,cancellation);
+        vendor=vendorCode(reply);
         try { checkReply(reply,op.name(),false); } catch(Failure f){if(f.error==Error.SERVICE)tokens.remove(op);throw f;}
         Double live=null,face=null;double[] quality=null;
         if(op==Operation.FaceLiveQualityCheck) {
@@ -157,7 +171,9 @@ public final class FaceClient {
             if(op==Operation.FaceLiveAnd1V1)face=number(reply.get("faceGrade"),true);
         }
         cancellation.check();return new Scores(op,config.mode,live,face,quality);
+        }catch(Failure f){throw new Failure(f.error,stage,f.httpStatus,f.vendorCode==VendorCode.UNCONFIRMED?vendor:f.vendorCode);}
     }
+    private static VendorCode vendorCode(Map<String,Object> reply){return reply!=null&&"00".equals(reply.get("code"))?VendorCode.SUCCESS_00:VendorCode.UNCONFIRMED;}
     private Map<String,Object> call(Map<String,Object> request,Cancellation cancel) throws Failure {
         cancel.check();Cancellation io=new Cancellation();
         Cancellation.Registration link=cancel.onCancel(io::cancel);
